@@ -1,1311 +1,1317 @@
-// Written in the D programming language
+/*
+*             Copyright László Szerémi 2022 - .
+*  Distributed under the Boost Software License, Version 1.0.
+*      (See accompanying file LICENSE_1_0.txt or copy at
+*            http://www.boost.org/LICENSE_1_0.txt)
+*/
 
 /++
-    This implements a DOM for representing an XML 1.0 document. $(LREF parseDOM)
-    uses an $(REF EntityRange, textbasedfileformats.xml, parser) to parse the document, and
-    $(LREF DOMEntity) recursively represents the DOM tree.
++   This module declares the DOM Level 3 interfaces as stated in the W3C DOM
++   specification.
++
++   For a more complete reference, see the
++   $(LINK2 https://www.w3.org/TR/DOM-Level-3-Core/, official specification),
++   from which all documentation in this module is taken.
++
++   Authors:
++   Lodovico Giaretta
++   László Szerémi
++
++   License:
++   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
++
++   Copyright:
++   Copyright Lodovico Giaretta 2016 --
++/
 
-    See the documentation for $(MREF textbasedfileformats.xml, parser) and
-    $(REF EntityRange, textbasedfileformats.xml, parser) for details on the parser and its
-    configuration options.
-
-    For convenience, $(REF EntityType, textbasedfileformats.xml, parser) and
-    $(REF simpleXML, textbasedfileformats.xml, parser) are publicly imported by this module,
-    since $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser) is required
-    to correctly use $(LREF DOMEntity), and
-    $(REF_ALTTEXT simpleXML, simpleXML, textbasedfileformats.xml, parser) is highly likely to
-    be used when calling $(LREF parseDOM).
-
-    Copyright: Copyright 2018 - 2020
-    License:   $(HTTP www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
-    Authors:   $(HTTPS jmdavisprog.com, Jonathan M Davis)
-    Source:    $(LINK_TO_SRC textbasedfileformats.xml/_dom.d)
-
-    See_Also: $(LINK2 http://www.w3.org/TR/REC-xml/, Official Specification for XML 1.0)
-  +/
 module textbasedfileformats.xml.dom;
 
-///
-unittest
-{
-    import std.range.primitives : empty;
-
-    auto xml = "<!-- comment -->\n" ~
-               "<root>\n" ~
-               "    <foo>some text<whatever/></foo>\n" ~
-               "    <bar/>\n" ~
-               "    <baz></baz>\n" ~
-               "</root>";
-    {
-        auto dom = parseDOM(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-        assert(dom.children.length == 2);
-
-        assert(dom.children[0].type == EntityType.comment);
-        assert(dom.children[0].text == " comment ");
-
-        auto root = dom.children[1];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-        assert(root.children.length == 3);
-
-        auto foo = root.children[0];
-        assert(foo.type == EntityType.elementStart);
-        assert(foo.name == "foo");
-        assert(foo.children.length == 2);
-
-        assert(foo.children[0].type == EntityType.text);
-        assert(foo.children[0].text == "some text");
-
-        assert(foo.children[1].type == EntityType.elementEmpty);
-        assert(foo.children[1].name == "whatever");
-
-        assert(root.children[1].type == EntityType.elementEmpty);
-        assert(root.children[1].name == "bar");
-
-        assert(root.children[2].type == EntityType.elementStart);
-        assert(root.children[2].name == "baz");
-        assert(root.children[2].children.length == 0);
-    }
-    {
-        auto dom = parseDOM!simpleXML(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-        assert(dom.children.length == 1);
-
-        auto root = dom.children[0];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-        assert(root.children.length == 3);
-
-        auto foo = root.children[0];
-        assert(foo.type == EntityType.elementStart);
-        assert(foo.name == "foo");
-        assert(foo.children.length == 2);
-
-        assert(foo.children[0].type == EntityType.text);
-        assert(foo.children[0].text == "some text");
-
-        assert(foo.children[1].type == EntityType.elementStart);
-        assert(foo.children[1].name == "whatever");
-        assert(foo.children[1].children.length == 0);
-
-        assert(root.children[1].type == EntityType.elementStart);
-        assert(root.children[1].name == "bar");
-        assert(root.children[1].children.length == 0);
-
-        assert(root.children[2].type == EntityType.elementStart);
-        assert(root.children[2].name == "baz");
-        assert(root.children[2].children.length == 0);
-    }
-}
-
-
-import std.range.primitives;
-import std.traits;
-
-public import textbasedfileformats.xml.parser : EntityType, simpleXML;
-import textbasedfileformats.xml.parser : Config, EntityRange;
-
+import textbasedfileformats.xml.interfaces;
+import std.typecons : BitFlags;
+import std.variant : Variant;
 
 /++
-    Represents an entity in an XML document as a DOM tree.
++   The DOMUserData type is used to store application data inside DOM nodes.
++/
+alias UserData = Variant;
 
-    parseDOM either takes a range of characters or an
-    $(REF EntityRange, textbasedfileformats.xml, parser) and generates a DOMEntity from that XML.
+/++
++   When associating an object to a key on a node using Node.setUserData() the
++   application can provide a handler that gets called when the node the object
++   is associated to is being cloned, imported, or renamed. This can be used by
++   the application to implement various behaviors regarding the data it associates
++   to the DOM nodes.
++/
+alias UserDataHandler = void delegate(UserDataOperation, string, UserData, Node,
+        Node) @safe;
 
-    When parseDOM processes the XML, it returns a DOMEntity representing the
-    entire document. Even though the XML document itself isn't technically an
-    entity in the XML document, it's simplest to treat it as if it were an
-    $(REF_ALTTEXT EntityType.elementStart, EntityType.elementStart, textbasedfileformats.xml, parser)
-    with an empty $(LREF2 name, _DOMEntity.name). That DOMEntity then contains
-    child entities that recursively define the DOM tree through their children.
-
-    For DOMEntities of type
-    $(REF_ALTTEXT EntityType.elementStart, EntityType.elementStart, textbasedfileformats.xml, parser),
-    $(LREF _DOMEntity.children) gives access to all of the child entities of
-    that start tag. Other DOMEntities have no children.
-
-    Note that the $(LREF2 type, _DOMEntity.type) determines which
-    properties of the DOMEntity can be used, and it can determine whether
-    functions which a DOMEntity is passed to are allowed to be called. Each
-    function lists which $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser)s
-    are allowed, and it is an error to call them with any other
-    $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser).
-
-    If parseDOM is given a range of characters, it in turn passes that to
-    $(REF parseXML, textbasedfileformats.xml, parser) to do the actual XML parsing. As such, that
-    overload accepts an optional $(REF Config, textbasedfileformats.xml, parser) as a template
-    argument to configure the parser.
-
-    If parseDOM is given an
-    $(REF_ALTTEXT EntityRange, EntityRange, textbasedfileformats.xml, parser), the range does
-    not have to be at the start of the document. It can be used to create a DOM
-    for a portion of the document. When a character range is passed to it, it
-    will return a DOMEntity with the $(LREF2 type, _DOMEntity.type)
-    $(REF_ALTTEXT EntityType.elementStart, EntityType.elementStart, textbasedfileformats.xml, parser)
-    and an empty $(LREF2 name, _DOMEntity.name). It will iterate the range until
-    it either reaches the end of the range, or it reaches the end tag which
-    matches the start tag which is the parent of the entity that was the
-    $(D front) of the range when it was passed to parseDOM. The
-    $(REF_ALTTEXT EntityType.elementStart, EntityType.elementStart, textbasedfileformats.xml, parser)
-    is passed by $(K_REF), so if it was not at the top level when it was passed
-    to parseDOM (and thus still has elements in it when parseDOM returns), the
-    range will then be at the entity after that matching end tag, and the
-    application can continue to process the range after that if it so chooses.
-
-    Params:
-        config = The $(REF Config, textbasedfileformats.xml, parser) to use with
-                 $(REF parseXML, textbasedfileformats.xml, parser) if the range passed to parseDOM
-                 is a range of characters.
-        range = Either a range of characters representing an entire XML document
-                or a $(REF EntityRange, textbasedfileformats.xml, parser) which may refer to some
-                or all of an XML document.
-
-    Returns: A DOMEntity representing the DOM tree from the point in the
-             document that was passed to parseDOM (the start of the document if
-             a range of characters was passed, and wherever in the document the
-             range was if an
-             $(REF_ALTTEXT EntityRange, EntityRange textbasedfileformats.xml, parser) was passed).
-
-    Throws: $(REF_ALTTEXT XMLParsingException, XMLParsingException, textbasedfileformats.xml, parser)
-            if the parser encounters invalid XML.
-  +/
-struct DOMEntity(R)
+/++
++   An integer indicating which type of node this is.
++
++   Note:
++   Numeric codes up to 200 are reserved to W3C for possible future use.
++/
+enum NodeType : ushort
 {
-public:
-
-    import std.algorithm.searching : canFind;
-    import std.range : only, takeExactly;
-    import std.typecons : Tuple;
-    import textbasedfileformats.xml.parser : TextPos;
-
-    private enum compileInTests = is(R == DOMCompileTests);
-
-    /++
-        The type used when any slice of the original range of characters is
-        used. If the range was a string or supports slicing, then SliceOfR is
-        the same type as the range; otherwise, it's the result of calling
-        $(PHOBOS_REF takeExactly, std, range) on it.
-
-        ---
-        import std.algorithm : filter;
-        import std.range : takeExactly;
-
-        static assert(is(DOMEntity!string.SliceOfR == string));
-
-        auto range = filter!(a => true)("some xml");
-
-        static assert(is(DOMEntity!(typeof(range)).SliceOfR ==
-                         typeof(takeExactly(range, 42))));
-        ---
-      +/
-    static if(isDynamicArray!R || hasSlicing!R)
-        alias SliceOfR = R;
-    else
-        alias SliceOfR = typeof(takeExactly(R.init, 42));
-
-    // https://issues.dlang.org/show_bug.cgi?id=11133 prevents this from being
-    // a ddoc-ed unit test.
-    static if(compileInTests) @safe unittest
-    {
-        import std.algorithm : filter;
-        import std.range : takeExactly;
-
-        static assert(is(DOMEntity!string.SliceOfR == string));
-
-        auto range = filter!(a => true)("some xml");
-
-        static assert(is(DOMEntity!(typeof(range)).SliceOfR ==
-                         typeof(takeExactly(range, 42))));
-    }
-
-
-    /++
-        The exact instantiation of $(PHOBOS_REF Tuple, std, typecons) that
-        $(LREF2 attributes, DOMEntity) returns a range of.
-
-        See_Also: $(LREF2 attributes, DOMEntity)
-      +/
-    alias Attribute = Tuple!(SliceOfR, "name", SliceOfR, "value", TextPos,  "pos");
-
-
-    /++
-        The $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser) for this
-        DOMEntity.
-
-        The type can never be
-        $(REF_ALTTEXT EntityType.elementEnd, EntityType.elementEnd, textbasedfileformats.xml, parser),
-        because the end of $(LREF2 children, DOMEntity.children) already
-        indicates where the contents of the start tag end.
-
-        type determines which properties of the DOMEntity can be used, and it
-        can determine whether functions which a DOMEntity is passed to are
-        allowed to be called. Each function lists which
-        $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser)s are allowed, and it
-        is an error to call them with any other
-        $(REF_ALTTEXT EntityType, EntityType, textbasedfileformats.xml, parser).
-      +/
-    @property EntityType type() @safe const pure nothrow @nogc
-    {
-        return _type;
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.range.primitives;
-
-        auto xml = "<root>\n" ~
-                   "    <!--no comment-->\n" ~
-                   "    <![CDATA[cdata run]]>\n" ~
-                   "    <text>I am text!</text>\n" ~
-                   "    <empty/>\n" ~
-                   "    <?pi?>\n" ~
-                   "</root>";
-
-        auto dom = parseDOM(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-        assert(dom.children.length == 1);
-
-        auto root = dom.children[0];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-        assert(root.children.length == 5);
-
-        assert(root.children[0].type == EntityType.comment);
-        assert(root.children[0].text == "no comment");
-
-        assert(root.children[1].type == EntityType.cdata);
-        assert(root.children[1].text == "cdata run");
-
-        auto textTag = root.children[2];
-        assert(textTag.type == EntityType.elementStart);
-        assert(textTag.name == "text");
-        assert(textTag.children.length == 1);
-
-        assert(textTag.children[0].type == EntityType.text);
-        assert(textTag.children[0].text == "I am text!");
-
-        assert(root.children[3].type == EntityType.elementEmpty);
-        assert(root.children[3].name == "empty");
-
-        assert(root.children[4].type == EntityType.pi);
-        assert(root.children[4].name == "pi");
-    }
-
-
-    /++
-        The position in the the original text where the entity starts.
-
-        See_Also: $(REF_ALTTEXT TextPos, TextPos, textbasedfileformats.xml, parser)$(BR)
-                  $(REF_ALTTEXT XMLParsingException._pos, XMLParsingException._pos, textbasedfileformats.xml, parser)
-      +/
-    @property TextPos pos() @safe const pure nothrow @nogc
-    {
-        return _pos;
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.range.primitives : empty;
-        import textbasedfileformats.xml.parser : TextPos;
-        import textbasedfileformats.xml.util : stripIndent;
-
-        auto xml = "<root>\n" ~
-                   "    <foo>\n" ~
-                   "        Foo and bar. Always foo and bar...\n" ~
-                   "    </foo>\n" ~
-                   "</root>";
-
-        auto dom = parseDOM(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-        assert(dom.pos == TextPos(1, 1));
-
-        auto root = dom.children[0];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-        assert(root.pos == TextPos(1, 1));
-
-        auto foo = root.children[0];
-        assert(foo.type == EntityType.elementStart);
-        assert(foo.name == "foo");
-        assert(foo.pos == TextPos(2, 5));
-
-        auto text = foo.children[0];
-        assert(text.type == EntityType.text);
-        assert(text.text.stripIndent() ==
-               "Foo and bar. Always foo and bar...");
-        assert(text.pos == TextPos(2, 10));
-    }
-
-
-    /++
-        Gives the name of this DOMEntity.
-
-        Note that this is the direct name in the XML for this entity and
-        does not contain any of the names of any of the parent entities that
-        this entity has.
-
-        $(TABLE
-            $(TR $(TH Supported $(LREF EntityType)s:))
-            $(TR $(TD $(REF_ALTTEXT elementStart, EntityType.elementStart, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT elementEnd, EntityType.elementEnd, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT elementEmpty, EntityType.elementEmpty, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT pi, EntityType.pi, textbasedfileformats.xml, parser)))
-        )
-
-        See_Also: $(LREF2 path, DOMEntity.path)
-      +/
-    @property SliceOfR name()
-    {
-        import textbasedfileformats.xml.internal : checkedSave;
-        with(EntityType)
-        {
-            import std.format : format;
-            assert(only(elementStart, elementEnd, elementEmpty, pi).canFind(_type),
-                   format("name cannot be called with %s", _type));
-        }
-        return checkedSave(_name);
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.range.primitives : empty;
-
-        auto xml = "<root>\n" ~
-                   "    <empty/>\n" ~
-                   "    <?pi?>\n" ~
-                   "</root>";
-
-        auto dom = parseDOM(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-
-        auto root = dom.children[0];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-
-        assert(root.children[0].type == EntityType.elementEmpty);
-        assert(root.children[0].name == "empty");
-
-        assert(root.children[1].type == EntityType.pi);
-        assert(root.children[1].name == "pi");
-    }
-
-
-    /++
-        Gives the list of the names of the parent start tags of this DOMEntity.
-
-        The name of the current entity (if it has one) is not included in the
-        path.
-
-        Note that if parseDOM were given an
-        $(REF_ALTTEXT EntityRange, EntityRange, textbasedfileformats.xml, parser), the path
-        starts where the range started. So, it doesn't necessarily contain the
-        entire path from the start of the XML document.
-
-        See_Also: $(LREF2 name, DOMEntity.name)
-      +/
-    @property SliceOfR[] path()
-    {
-        return _path;
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.range.primitives : empty;
-
-        auto xml = "<root>\n" ~
-                   "    <bar>\n" ~
-                   "        <baz>\n" ~
-                   "            <xyzzy/>\n" ~
-                   "        </baz>\n" ~
-                   "        <frobozz>\n" ~
-                   "            <!-- comment -->\n" ~
-                   "            It's magic!\n" ~
-                   "        </frobozz>\n" ~
-                   "    </bar>\n" ~
-                   "    <foo></foo>\n" ~
-                   "</root>";
-
-        auto dom = parseDOM(xml);
-        assert(dom.type == EntityType.elementStart);
-        assert(dom.name.empty);
-        assert(dom.path.empty);
-
-        auto root = dom.children[0];
-        assert(root.type == EntityType.elementStart);
-        assert(root.name == "root");
-        assert(root.path.empty);
-
-        auto bar = root.children[0];
-        assert(bar.type == EntityType.elementStart);
-        assert(bar.name == "bar");
-        assert(bar.path == ["root"]);
-
-        auto baz = bar.children[0];
-        assert(baz.type == EntityType.elementStart);
-        assert(baz.name == "baz");
-        assert(baz.path == ["root", "bar"]);
-
-        auto xyzzy = baz.children[0];
-        assert(xyzzy.type == EntityType.elementEmpty);
-        assert(xyzzy.name == "xyzzy");
-        assert(xyzzy.path == ["root", "bar", "baz"]);
-
-        auto frobozz = bar.children[1];
-        assert(frobozz.type == EntityType.elementStart);
-        assert(frobozz.name == "frobozz");
-        assert(frobozz.path == ["root", "bar"]);
-
-        auto comment = frobozz.children[0];
-        assert(comment.type == EntityType.comment);
-        assert(comment.text == " comment ");
-        assert(comment.path == ["root", "bar", "frobozz"]);
-
-        auto text = frobozz.children[1];
-        assert(text.type == EntityType.text);
-        assert(text.text == "\n            It's magic!\n        ");
-        assert(text.path == ["root", "bar", "frobozz"]);
-
-        auto foo = root.children[1];
-        assert(foo.type == EntityType.elementStart);
-        assert(foo.name == "foo");
-        assert(foo.path == ["root"]);
-    }
-
-
-    /++
-        Returns a dynamic array of attributes for a start tag where each
-        attribute is represented as a$(BR)
-        $(D $(PHOBOS_REF_ALTTEXT Tuple, Tuple, std, typecons)!(
-                  $(LREF2 SliceOfR, EntityRange), $(D_STRING "name"),
-                  $(LREF2 SliceOfR, EntityRange), $(D_STRING "value"),
-                  $(REF_ALTTEXT TextPos, TextPos, textbasedfileformats.xml, parser), $(D_STRING "pos"))).
-
-        $(TABLE
-            $(TR $(TH Supported $(LREF EntityType)s:))
-            $(TR $(TD $(REF_ALTTEXT elementStart, EntityType.elementStart, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT elementEmpty, EntityType.elementEmpty, textbasedfileformats.xml, parser)))
-        )
-
-        See_Also: $(LREF DomEntity.Attribute)$(BR)
-                  $(REF normalize, textbasedfileformats.xml, util)$(BR)
-                  $(REF asNormalized, textbasedfileformats.xml, util)
-      +/
-    @property auto attributes()
-    {
-        with(EntityType)
-        {
-            import std.format : format;
-            assert(_type == elementStart || _type == elementEmpty,
-                   format("attributes cannot be called with %s", _type));
-        }
-        return _attributes;
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.algorithm.comparison : equal;
-        import std.algorithm.iteration : filter;
-        import std.range.primitives : empty;
-        import textbasedfileformats.xml.parser : TextPos;
-
-        {
-            auto xml = "<root/>";
-            auto root = parseDOM(xml).children[0];
-            assert(root.type == EntityType.elementEmpty);
-            assert(root.attributes.empty);
-
-            static assert(is(ElementType!(typeof(root.attributes)) ==
-                             typeof(root).Attribute));
-        }
-        {
-            auto xml = "<root a='42' q='29' w='hello'/>";
-            auto root = parseDOM(xml).children[0];
-            assert(root.type == EntityType.elementEmpty);
-
-            auto attrs = root.attributes;
-            assert(attrs.length == 3);
-
-            assert(attrs[0].name == "a");
-            assert(attrs[0].value == "42");
-            assert(attrs[0].pos == TextPos(1, 7));
-
-            assert(attrs[1].name == "q");
-            assert(attrs[1].value == "29");
-            assert(attrs[1].pos == TextPos(1, 14));
-
-            assert(attrs[2].name == "w");
-            assert(attrs[2].value == "hello");
-            assert(attrs[2].pos == TextPos(1, 21));
-        }
-        // Because the type of name and value is SliceOfR, == with a string
-        // only works if the range passed to parseXML was string.
-        {
-            auto xml = filter!"true"("<root a='42' q='29' w='hello'/>");
-            auto root = parseDOM(xml).children[0];
-            assert(root.type == EntityType.elementEmpty);
-
-            auto attrs = root.attributes;
-            assert(attrs.length == 3);
-
-            assert(equal(attrs[0].name, "a"));
-            assert(equal(attrs[0].value, "42"));
-            assert(attrs[0].pos == TextPos(1, 7));
-
-            assert(equal(attrs[1].name, "q"));
-            assert(equal(attrs[1].value, "29"));
-            assert(attrs[1].pos == TextPos(1, 14));
-
-            assert(equal(attrs[2].name, "w"));
-            assert(equal(attrs[2].value, "hello"));
-            assert(attrs[2].pos == TextPos(1, 21));
-        }
-    }
-
-
-    /++
-        Returns the textual value of this DOMEntity.
-
-        In the case of
-        $(REF_ALTTEXT EntityType.pi, EntityType.pi, textbasedfileformats.xml, parser), this is the
-        text that follows the name, whereas in the other cases, the text is the
-        entire contents of the entity (save for the delimeters on the ends if
-        that entity has them).
-
-        $(TABLE
-            $(TR $(TH Supported $(LREF EntityType)s:))
-            $(TR $(TD $(REF_ALTTEXT cdata, EntityType.cdata, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT comment, EntityType.comment, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT pi, EntityType.pi, textbasedfileformats.xml, parser)))
-            $(TR $(TD $(REF_ALTTEXT _text, EntityType._text, textbasedfileformats.xml, parser)))
-        )
-
-        See_Also: $(REF normalize, textbasedfileformats.xml, util)$(BR)
-                  $(REF asNormalized, textbasedfileformats.xml, util)$(BR)
-                  $(REF stripIndent, textbasedfileformats.xml, util)$(BR)
-                  $(REF withoutIndent, textbasedfileformats.xml, util)
-      +/
-    @property SliceOfR text()
-    {
-        import textbasedfileformats.xml.internal : checkedSave;
-        with(EntityType)
-        {
-            import std.format : format;
-            assert(only(cdata, comment, pi, text).canFind(_type),
-                   format("text cannot be called with %s", _type));
-        }
-        return checkedSave(_text);
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        import std.range.primitives : empty;
-
-        auto xml = "<?xml version='1.0'?>\n" ~
-                   "<?instructionName?>\n" ~
-                   "<?foo here is something to say?>\n" ~
-                   "<root>\n" ~
-                   "    <![CDATA[ Yay! random text >> << ]]>\n" ~
-                   "    <!-- some random comment -->\n" ~
-                   "    <p>something here</p>\n" ~
-                   "    <p>\n" ~
-                   "       something else\n" ~
-                   "       here</p>\n" ~
-                   "</root>";
-        auto dom = parseDOM(xml);
-
-        // "<?instructionName?>\n" ~
-        auto pi1 = dom.children[0];
-        assert(pi1.type == EntityType.pi);
-        assert(pi1.name == "instructionName");
-        assert(pi1.text.empty);
-
-        // "<?foo here is something to say?>\n" ~
-        auto pi2 = dom.children[1];
-        assert(pi2.type == EntityType.pi);
-        assert(pi2.name == "foo");
-        assert(pi2.text == "here is something to say");
-
-        // "<root>\n" ~
-        auto root = dom.children[2];
-        assert(root.type == EntityType.elementStart);
-
-        // "    <![CDATA[ Yay! random text >> << ]]>\n" ~
-        auto cdata = root.children[0];
-        assert(cdata.type == EntityType.cdata);
-        assert(cdata.text == " Yay! random text >> << ");
-
-        // "    <!-- some random comment -->\n" ~
-        auto comment = root.children[1];
-        assert(comment.type == EntityType.comment);
-        assert(comment.text == " some random comment ");
-
-        // "    <p>something here</p>\n" ~
-        auto p1 = root.children[2];
-        assert(p1.type == EntityType.elementStart);
-        assert(p1.name == "p");
-
-        assert(p1.children[0].type == EntityType.text);
-        assert(p1.children[0].text == "something here");
-
-        // "    <p>\n" ~
-        // "       something else\n" ~
-        // "       here</p>\n" ~
-        auto p2 = root.children[3];
-        assert(p2.type == EntityType.elementStart);
-
-        assert(p2.children[0].type == EntityType.text);
-        assert(p2.children[0].text == "\n       something else\n       here");
-    }
-
-
-    /++
-        Returns the child entities of the current entity.
-
-        They are in the same order that they were in the XML document.
-
-        $(TABLE
-            $(TR $(TH Supported $(LREF EntityType)s:))
-            $(TR $(TD $(REF_ALTTEXT elementStart, elementStart.elementStart, textbasedfileformats.xml, parser)))
-        )
-      +/
-    @property DOMEntity[] children()
-    {
-        import std.format : format;
-        assert(_type == EntityType.elementStart,
-               format!"children cannot be called with %s"(_type));
-        return _children;
-    }
-
-    ///
-    static if(compileInTests) unittest
-    {
-        auto xml = "<potato>\n" ~
-                   "    <!--comment-->\n" ~
-                   "    <foo>bar</foo>\n" ~
-                   "    <tag>\n" ~
-                   "        <silly>you</silly>\n" ~
-                   "        <empty/>\n" ~
-                   "        <nocontent></nocontent>\n" ~
-                   "    </tag>\n" ~
-                   "</potato>\n" ~
-                   "<!--the end-->";
-        auto dom = parseDOM(xml);
-        assert(dom.children.length == 2);
-
-        auto potato = dom.children[0];
-        assert(potato.type == EntityType.elementStart);
-        assert(potato.name == "potato");
-        assert(potato.children.length == 3);
-
-        auto comment = potato.children[0];
-        assert(comment.type == EntityType.comment);
-        assert(comment.text == "comment");
-
-        auto foo = potato.children[1];
-        assert(foo.type == EntityType.elementStart);
-        assert(foo.name == "foo");
-        assert(foo.children.length == 1);
-
-        assert(foo.children[0].type == EntityType.text);
-        assert(foo.children[0].text == "bar");
-
-        auto tag = potato.children[2];
-        assert(tag.type == EntityType.elementStart);
-        assert(tag.name == "tag");
-        assert(tag.children.length == 3);
-
-        auto silly = tag.children[0];
-        assert(silly.type == EntityType.elementStart);
-        assert(silly.name == "silly");
-        assert(silly.children.length == 1);
-
-        assert(silly.children[0].type == EntityType.text);
-        assert(silly.children[0].text == "you");
-
-        auto empty = tag.children[1];
-        assert(empty.type == EntityType.elementEmpty);
-        assert(empty.name == "empty");
-
-        auto nocontent = tag.children[2];
-        assert(nocontent.type == EntityType.elementStart);
-        assert(nocontent.name == "nocontent");
-        assert(nocontent.children.length == 0);
-
-        auto endComment = dom.children[1];
-        assert(endComment.type == EntityType.comment);
-        assert(endComment.text == "the end");
-    }
-
-
-    // Reduce the chance of bugs if reference-type ranges are involved.
-    static if(!isDynamicArray!R) this(this)
-    {
-        with(EntityType) final switch(_type)
-        {
-            case cdata: goto case text;
-            case comment: goto case text;
-            case elementStart:
-            {
-                _name = _name.save;
-                break;
-            }
-            case elementEnd: goto case elementStart;
-            case elementEmpty: goto case elementStart;
-            case text:
-            {
-                _text = _text.save;
-                break;
-            }
-            case pi:
-            {
-                _text = _text.save;
-                goto case elementStart;
-            }
-        }
-    }
-
-
-private:
-
-    this(EntityType type, TextPos pos)
-    {
-        _type = type;
-        _pos = pos;
-
-        // None of these initializations should be required. https://issues.dlang.org/show_bug.cgi?id=13945
-        _name = typeof(_name).init;
-        _text = typeof(_text).init;
-    }
-
-    auto _type = EntityType.elementStart;
-    TextPos _pos;
-    SliceOfR _name;
-    SliceOfR[] _path;
-    Attribute[] _attributes;
-    SliceOfR _text;
-    DOMEntity[] _children;
-}
-
-/// Ditto
-DOMEntity!R parseDOM(Config config = Config.init, R)(R range)
-    if(isForwardRange!R && isSomeChar!(ElementType!R))
-{
-    import textbasedfileformats.xml.parser : parseXML;
-    auto entityRange = parseXML!config(range);
-    typeof(return) retval;
-    _parseDOM(entityRange, retval);
-    return retval;
-}
-
-/// Ditto
-DOMEntity!(ER.Input) parseDOM(ER)(ref ER range)
-    if(isInstanceOf!(EntityRange, ER))
-{
-    typeof(return) retval;
-    if(range.empty)
-        return retval;
-    retval._pos = range.front.pos;
-    if(range.front.type == EntityType.elementEnd)
-        return retval;
-    _parseDOM(range, retval);
-    return retval;
+    element = 1,
+    attribute,
+    text,
+    cdataSection,
+    entityReference,
+    entity,
+    processingInstruction,
+    comment,
+    document,
+    documentType,
+    documentFragment,
+    notation,
 }
 
 /++
-    parseDOM with the default $(REF_ALTTEXT Config, Config, textbasedfileformats.xml, parser) and a
-    range of characters.
-  +/
-@safe unittest
++   A bitmask indicating the relative document position of a node with respect to another node.
++   Returned by `Node.compareDocumentPosition`.
++/
+enum DocumentPosition : ushort
 {
-    import std.range.primitives;
-
-    auto xml = "<root>\n" ~
-               "    <!-- no comment -->\n" ~
-               "    <foo></foo>\n" ~
-               "    <baz>\n" ~
-               "        <xyzzy>It's an adventure!</xyzzy>\n" ~
-               "    </baz>\n" ~
-               "    <tag/>\n" ~
-               "</root>";
-
-    auto dom = parseDOM(xml);
-    assert(dom.type == EntityType.elementStart);
-    assert(dom.name.empty);
-    assert(dom.children.length == 1);
-
-    auto root = dom.children[0];
-    assert(root.type == EntityType.elementStart);
-    assert(root.name == "root");
-    assert(root.children.length == 4);
-
-    assert(root.children[0].type == EntityType.comment);
-    assert(root.children[0].text == " no comment ");
-
-    assert(root.children[1].type == EntityType.elementStart);
-    assert(root.children[1].name == "foo");
-    assert(root.children[1].children.length == 0);
-
-    auto baz = root.children[2];
-    assert(baz.type == EntityType.elementStart);
-    assert(baz.name == "baz");
-    assert(baz.children.length == 1);
-
-    auto xyzzy = baz.children[0];
-    assert(xyzzy.type == EntityType.elementStart);
-    assert(xyzzy.name == "xyzzy");
-    assert(xyzzy.children.length == 1);
-
-    assert(xyzzy.children[0].type == EntityType.text);
-    assert(xyzzy.children[0].text == "It's an adventure!");
-
-    assert(root.children[3].type == EntityType.elementEmpty);
-    assert(root.children[3].name == "tag");
+    /// Set when the two nodes are in fact the same
+    none = 0,
+    /// Set when the two nodes are not in the same tree
+    disconnected = 1,
+    /// Set when the second node precedes the first
+    preceding = 2,
+    /// Set when the second node follows the first
+    following = 4,
+    /// Set when the second node _contains the first
+    contains = 8,
+    /// Set when the second node is contained by the first
+    containedBy = 16,
+    /++
+    +   Set when the returned ordering of the two nodes may be different across
+    +   DOM implementations; for example, for two attributes of the same node,
+    +   an implementation may return `preceding | implementationSpecific` and another
+    +   may return `following | implementationSpecific`, because at the DOM level
+    +   the attributes ordering is unspecified
+    +/
+    implementationSpecific = 32,
 }
 
 /++
-    parseDOM with $(REF_ALTTEXT simpleXML, simpleXML, textbasedfileformats.xml, parser) and a range
-    of characters.
-  +/
-unittest
++   An integer indicating the type of operation being performed on a node.
++/
+enum UserDataOperation : ushort
 {
-    import std.range.primitives : empty;
-
-    auto xml = "<root>\n" ~
-               "    <!-- no comment -->\n" ~
-               "    <foo></foo>\n" ~
-               "    <baz>\n" ~
-               "        <xyzzy>It's an adventure!</xyzzy>\n" ~
-               "    </baz>\n" ~
-               "    <tag/>\n" ~
-               "</root>";
-
-    auto dom = parseDOM!simpleXML(xml);
-    assert(dom.type == EntityType.elementStart);
-    assert(dom.name.empty);
-    assert(dom.children.length == 1);
-
-    auto root = dom.children[0];
-    assert(root.type == EntityType.elementStart);
-    assert(root.name == "root");
-    assert(root.children.length == 3);
-
-    assert(root.children[0].type == EntityType.elementStart);
-    assert(root.children[0].name == "foo");
-    assert(root.children[0].children.length == 0);
-
-    auto baz = root.children[1];
-    assert(baz.type == EntityType.elementStart);
-    assert(baz.name == "baz");
-    assert(baz.children.length == 1);
-
-    auto xyzzy = baz.children[0];
-    assert(xyzzy.type == EntityType.elementStart);
-    assert(xyzzy.name == "xyzzy");
-    assert(xyzzy.children.length == 1);
-
-    assert(xyzzy.children[0].type == EntityType.text);
-    assert(xyzzy.children[0].text == "It's an adventure!");
-
-    assert(root.children[2].type == EntityType.elementStart);
-    assert(root.children[2].name == "tag");
-    assert(root.children[2].children.length == 0);
+    /// The node is cloned, using `Node.cloneNode()`.
+    nodeCloned = 1,
+    /// The node is imported, using `Document.importNode()`.
+    nodeImported,
+    /++
+    +   The node is deleted.
+    +
+    +   Note:
+    +   This may not be supported or may not be reliable in certain environments,
+    +   where the implementation has no real control over when objects are actually deleted.
+    +/
+    nodeDeleted,
+    /// The node is renamed, using `Document.renameNode()`.
+    nodeRenamed,
+    /// The node is adopted, using `Document.adoptNode()`.
+    nodeAdopted,
 }
 
 /++
-    parseDOM with $(REF_ALTTEXT simpleXML, simpleXML, textbasedfileformats.xml, parser) and an
-    $(REF_ALTTEXT EntityRange, EntityRange, textbasedfileformats.xml, parser).
-  +/
-unittest
++   An integer indicating the type of error generated.
++
++   Note:
++   Other numeric codes are reserved for W3C for possible future use.
++/
+enum ExceptionCode : ushort
 {
-    import std.range.primitives : empty;
-    import textbasedfileformats.xml.parser : parseXML;
-
-    auto xml = "<root>\n" ~
-               "    <!-- no comment -->\n" ~
-               "    <foo></foo>\n" ~
-               "    <baz>\n" ~
-               "        <xyzzy>It's an adventure!</xyzzy>\n" ~
-               "    </baz>\n" ~
-               "    <tag/>\n" ~
-               "</root>";
-
-    auto range = parseXML!simpleXML(xml);
-    auto dom = parseDOM(range);
-    assert(range.empty);
-
-    assert(dom.type == EntityType.elementStart);
-    assert(dom.name.empty);
-    assert(dom.children.length == 1);
-
-    auto root = dom.children[0];
-    assert(root.type == EntityType.elementStart);
-    assert(root.name == "root");
-    assert(root.children.length == 3);
-
-    assert(root.children[0].type == EntityType.elementStart);
-    assert(root.children[0].name == "foo");
-    assert(root.children[0].children.length == 0);
-
-    auto baz = root.children[1];
-    assert(baz.type == EntityType.elementStart);
-    assert(baz.name == "baz");
-    assert(baz.children.length == 1);
-
-    auto xyzzy = baz.children[0];
-    assert(xyzzy.type == EntityType.elementStart);
-    assert(xyzzy.name == "xyzzy");
-    assert(xyzzy.children.length == 1);
-
-    assert(xyzzy.children[0].type == EntityType.text);
-    assert(xyzzy.children[0].text == "It's an adventure!");
-
-    assert(root.children[2].type == EntityType.elementStart);
-    assert(root.children[2].name == "tag");
-    assert(root.children[2].children.length == 0);
+    /// If index or size is negative, or greater than the allowed value.
+    indexSize,
+    /// If the specified range of text does not fit into a `string`.
+    domStringSize,
+    /// If any `Node` is inserted somewhere it doesn't belong.
+    hierarchyRequest,
+    /// If a `Node` is used in a different document than the one that created it (that doesn't support it).
+    wrongDocument,
+    /// If an invalid or illegal character is specified, such as in an XML name.
+    invalidCharacter,
+    /// If data is specified for a `Node` which does not support data.
+    noDataAllowed,
+    /// If an attempt is made to modify an object where modifications are not allowed.
+    noModificationAllowed,
+    /// If an attempt is made to reference a `Node` in a context where it does not exist.
+    notFound,
+    /// If the implementation does not support the requested type of object or operation.
+    notSupported,
+    /// If an attempt is made to add an attribute that is already in use elsewhere.
+    inuseAttribute,
+    /// If an attempt is made to use an object that is not, or is no longer, usable.
+    invalidState,
+    /// If an invalid or illegal string is specified.
+    syntax,
+    /// If an attempt is made to modify the type of the underlying object.
+    invalidModification,
+    /// If an attempt is made to create or change an object in a way which is incorrect with regard to namespaces.
+    namespace,
+    /// If a parameter or an operation is not supported by the underlying object.
+    invalidAccess,
+    /// If a call to a method such as insertBefore or removeChild would make the `Node` invalid.
+    validation,
+    /// If the type of an object is incompatible with the expected type of the parameter associated to the object.
+    typeMismatch,
 }
 
+/// An integer indicating the severity of a `DOMError`.
+enum ErrorSeverity : ushort
+{
+    /++
+    +   The severity of the error described by the `DOMError` is warning. A `WARNING`
+    +   will not cause the processing to stop, unless the call of the `DOMErrorHandler`
+    +   returns `false`.
+    +/
+    warning,
+    /++
+    +   The severity of the error described by the `DOMError` is error. A `ERROR`
+    +   may not cause the processing to stop if the error can be recovered, unless
+    +   the call of the `DOMErrorHandler` returns `false`.
+    +/
+    error,
+    /++
+    +   The severity of the error described by the `DOMError` is fatal error. A `FATAL_ERROR`
+    +   will cause the normal processing to stop. The return value of calling the `DOMErrorHandler`
+    +   is ignored unless the implementation chooses to continue, in which case
+    +   the behavior becomes undefined.
+    +/
+    fatalError,
+}
+
+enum DerivationMethod : ulong
+{
+    restriction = 0x00000001,
+    extension = 0x00000002,
+    union_ = 0x00000004,
+    list = 0x00000008,
+}
+
+@safe:
 /++
-    parseDOM with an $(REF_ALTTEXT EntityRange, EntityRange, textbasedfileformats.xml, parser)
-    which is not at the start of the document.
-  +/
-unittest
++   DOM operations only raise exceptions in "exceptional" circumstances, i.e.,
++   when an operation is impossible to perform (either for logical reasons, because
++   data is lost, or because the implementation has become unstable). In general,
++   DOM methods return specific error values in ordinary processing situations,
++   such as out-of-bound errors when using `NodeList`.
++
++   Implementations should raise other exceptions under other circumstances. For
++   example, implementations should raise an implementation-dependent exception
++   if a `null` argument is passed when `null` was not expected.
++/
+abstract class DOMException : XMLException
 {
-    import std.range.primitives : empty;
-    import textbasedfileformats.xml.parser : parseXML, skipToPath;
+    ///
+    @property ExceptionCode code();
 
-    auto xml = "<root>\n" ~
-               "    <!-- no comment -->\n" ~
-               "    <foo></foo>\n" ~
-               "    <baz>\n" ~
-               "        <xyzzy>It's an adventure!</xyzzy>\n" ~
-               "    </baz>\n" ~
-               "    <tag/>\n" ~
-               "</root>";
-
-    auto range = parseXML!simpleXML(xml).skipToPath("baz/xyzzy");
-    assert(range.front.type == EntityType.elementStart);
-    assert(range.front.name == "xyzzy");
-
-    auto dom = parseDOM(range);
-    assert(range.front.type == EntityType.elementStart);
-    assert(range.front.name == "tag");
-
-    assert(dom.type == EntityType.elementStart);
-    assert(dom.name.empty);
-    assert(dom.children.length == 1);
-
-    auto xyzzy = dom.children[0];
-    assert(xyzzy.type == EntityType.elementStart);
-    assert(xyzzy.name == "xyzzy");
-    assert(xyzzy.children.length == 1);
-
-    assert(xyzzy.children[0].type == EntityType.text);
-    assert(xyzzy.children[0].text == "It's an adventure!");
-}
-
-/// parseDOM at compile-time
-unittest
-{
-    enum xml = "<!-- comment -->\n" ~
-               "<root>\n" ~
-               "    <foo>some text<whatever/></foo>\n" ~
-               "    <bar/>\n" ~
-               "    <baz></baz>\n" ~
-               "</root>";
-
-    enum dom = parseDOM(xml);
-    static assert(dom.type == EntityType.elementStart);
-    static assert(dom.name.empty);
-    static assert(dom.children.length == 2);
-
-    static assert(dom.children[0].type == EntityType.comment);
-    static assert(dom.children[0].text == " comment ");
-}
-
-// This is purely to provide a way to trigger the unittest blocks in DOMEntity
-// without compiling them in normally.
-private struct DOMCompileTests
-{
-    @property bool empty() @safe pure nothrow @nogc { assert(0); }
-    @property char front() @safe pure nothrow @nogc { assert(0); }
-    void popFront() @safe pure nothrow @nogc { assert(0); }
-    @property typeof(this) save() @safe pure nothrow @nogc { assert(0); }
-}
-
-unittest
-{
-    DOMEntity!DOMCompileTests _domTests;
-}
-
-
-private:
-
-void _parseDOM(ER, DE)(ref ER range, ref DE parent, ER.SliceOfR[] path = null)
-{
-    assert(!range.empty);
-    assert(range.front.type != EntityType.elementEnd);
-
-    import std.array : appender, array;
-    auto children = appender!(DE[])();
-
-    while(!range.empty)
+    ///
+    @nogc @safe pure nothrow this(string msg, string file = __FILE__,
+            size_t line = __LINE__, Throwable nextInChain = null)
     {
-        auto entity = range.front;
-        range.popFront();
-        if(entity.type == EntityType.elementEnd)
-            break;
-
-        auto child = DE(entity.type, entity.pos);
-        child._path = path;
-
-        with(EntityType) final switch(entity.type)
-        {
-            case cdata: goto case text;
-            case comment: goto case text;
-            case elementStart:
-            {
-                child._name = entity.name;
-                child._attributes = entity.attributes.array();
-
-                if(range.front.type == EntityType.elementEnd)
-                    range.popFront();
-                else
-                {
-                    if(!entity.name.empty)
-                        path ~= entity.name;
-                    // TODO The explicit instantiation doesn't hurt, but it
-                    // shouldn't be necessary, and if it's not there, we get
-                    // a compiler error. It should be reduced and reported.
-                    _parseDOM!(ER, DE)(range, child, path);
-                    --path.length;
-                }
-                break;
-            }
-            case elementEnd: assert(0);
-            case elementEmpty:
-            {
-                child._name = entity.name;
-                child._attributes = entity.attributes.array();
-                break;
-            }
-            case text:
-            {
-                child._text = entity.text;
-                break;
-            }
-            case pi:
-            {
-                child._name = entity.name;
-                child._text = entity.text;
-                break;
-            }
-        }
-
-        put(children, child);
+        super(msg, file, line, nextInChain);
     }
 
-    parent._children = children.data;
+    @nogc @safe pure nothrow this(string msg, Throwable nextInChain,
+            string file = __FILE__, size_t line = __LINE__)
+    {
+        super(msg, file, line, nextInChain);
+    }
 }
 
-unittest
+/++
++   The `stringList` interface provides the abstraction of an ordered collection
++   of `string` values, without defining or constraining how this collection is
++   implemented. The items in the stringList are accessible via an integral index,
++   starting from `0`.
++/
+interface stringList
 {
-    import std.algorithm.comparison : equal;
-    import textbasedfileformats.xml.internal : testRangeFuncs;
-    import textbasedfileformats.xml.parser : parseXML, TextPos;
+    string item(size_t index);
+    @property size_t length();
+    bool contains(string str);
+}
 
-    static void testChildren(ER, size_t line = __LINE__)(ref ER entityRange, int row, int col, EntityType[] expected...)
+/++
++   The `DOMImplementationList` interface provides the abstraction of an ordered
++   collection of DOM implementations, without defining or constraining how this
++   collection is implemented. The items in the `DOMImplementationList` are accessible
++   via an integral index, starting from `0`.
++/
+interface DOMImplementationList
+{
+    DOMImplementation item(size_t index);
+    @property size_t length();
+}
+
+/++
++   This interface permits a DOM implementer to supply one or more
++   implementations, based upon requested features and versions, as specified in
++   DOM Features. Each implemented DOMImplementationSource object is listed in
++   the binding-specific list of available sources so that its
++   `DOMImplementation` objects are made available.
++/
+interface DOMImplementationSource
+{
+    /// A method to request the first DOM implementation that supports the
+    /// specified features.
+    DOMImplementation getDOMImplementation(string features);
+    /// A method to request a list of DOM implementations that support the
+    /// specified features and versions, as specified in DOM Features.
+    DOMImplementationList getDOMImplementationList(string features);
+}
+
+/++
++   The DOMImplementation interface provides a number of methods for performing
++   operations that are independent of any particular instance of the document
++   object model.
++/
+interface DOMImplementation
+{
+    /++
+    +   Creates an empty DocumentType node. Entity declarations and notations
+    +   are not made available. Entity reference expansions and default
+    +   attribute additions do not occur.
+    +/
+    DocumentType createDocumentType(string qualifiedName, string publicId, string systemId);
+
+    /++
+    +   Creates a DOM Document object of the specified type with its document element.
+    +
+    +   Note that based on the DocumentType given to create the document, the
+    +   implementation may instantiate specialized Document objects that support
+    +   additional features than the "Core", such as "HTML". On the other hand,
+    +   setting the DocumentType after the document was created makes this very
+    +   unlikely to happen.
+    +/
+    Document createDocument(string namespaceURI, string qualifiedName, DocumentType doctype);
+
+    bool hasFeature(string feature, string version_);
+    Object getFeature(string feature, string version_);
+}
+
+/++
++   `DocumentFragment` is a "lightweight" or "minimal" `Document` object. It is very
++   common to want to be able to extract a portion of a document's tree or to create
++   a new fragment of a document. Imagine implementing a user command like cut or
++   rearranging a document by moving fragments around. It is desirable to have an
++   object which can hold such fragments and it is quite natural to use a `Node`
++   for this purpose. While it is true that a `Document` object could fulfill this
++   role, a `Document` object can potentially be a heavyweight object, depending
++   on the underlying implementation. What is really needed for this is a very lightweight
++   object. `DocumentFragment` is such an object.
++
++   Furthermore, various operations -- such as inserting nodes as children of another
++   `Node` -- may take `DocumentFragment` objects as arguments; this results in
++   all the child nodes of the `DocumentFragment` being moved to the child list of this node.
++
++   The children of a `DocumentFragment` node are zero or more nodes representing
++   the tops of any sub-trees defining the structure of the document. `DocumentFragment`
++   nodes do not need to be well-formed XML documents (although they do need to follow
++   the rules imposed upon well-formed XML parsed entities, which can have multiple
++   top nodes). For example, a `DocumentFragment` might have only one child and that
++   child node could be a `Text` node. Such a structure model represents neither
++   an HTML document nor a well-formed XML document.
++
++   When a `DocumentFragment` is inserted into a `Document` (or indeed any other
++   `Node` that may take children) the children of the `DocumentFragment` and not
++   the `DocumentFragment` itself are inserted into the `Node`. This makes the `DocumentFragment`
++   very useful when the user wishes to create nodes that are siblings; the `DocumentFragment`
++   acts as the parent of these nodes so that the user can use the standard methods
++   from the `Node` interface, such as `Node.insertBefore` and `Node.appendChild`.
++/
+interface DocumentFragment : Node
+{
+}
+
+/++
++   The `Document` interface represents the entire HTML or XML document. Conceptually,
++   it is the root of the document tree, and provides the primary access to the document's data.
++
++   Since elements, text nodes, comments, processing instructions, etc. cannot exist
++   outside the context of a `Document`, the `Document` interface also contains the
++   factory methods needed to create these objects. The `Node` objects created have
++   a `ownerDocument` attribute which associates them with the `Document` within
++   whose context they were created.
++/
+interface Document : Node
+{
+    /++
+    +   The `DocumentType` associated with this document. For XML documents without a
+    +   document type declaration this returns `null`.
+    +
+    +   This provides direct access to the `DocumentType` node, child node of this
+    +   `Document`. This node can be set at document creation time and later changed
+    +   through the use of child nodes manipulation methods, such as `Node.insertBefore`,
+    +   or `Node.replaceChild`.
+    +/
+    @property DocumentType doctype();
+    /++
+    +   The `DOMImplementation` object that handles this document. A DOM application
+    +   may use objects from multiple implementations.
+    +/
+    @property DOMImplementation implementation();
+    /++
+    +   This is a convenience attribute that allows direct access to the child node
+    +   that is the document element of the document.
+    +/
+    @property Element documentElement();
+
+    /++
+    +   Creates an `Element` of the type specified.
+    +   In addition, if there are known attributes with default values, `Attr` nodes
+    +   representing them are automatically created and attached to the element.
+    +   To create an `Element` with a qualified name and namespace URI, use the
+    +   `createElementNS` method.
+    +/
+    Element createElement(string tagName);
+    /++
+    +   Creates an `Element` of the given qualified name and namespace URI.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Element createElementNS(string namespaceURI, string qualifiedName);
+    /// Creates an empty `DocumentFragment` object.
+    DocumentFragment createDocumentFragment();
+    /// Creates a `Text` node given the specified string.
+    Text createTextNode(string data);
+    /// Creates a `Comment` node given the specified string.
+    Comment createComment(string data);
+    /// Creates a `CDATASection` node whose value is the specified string.
+    CDATASection createCDATASection(string data);
+    /// Creates a `ProcessingInstruction` node given the specified name and data strings.
+    ProcessingInstruction createProcessingInstruction(string target, string data);
+    /++
+    +   Creates an `Attr` of the given name. Note that the `Attr` instance can
+    +   then be set on an `Element` using the `setAttributeNode` method.
+    +   To create an attribute with a qualified name and namespace URI, use the
+    +   `createAttributeNS` method.
+    +/
+    Attr createAttribute(string name);
+    /++
+    +   Creates an attribute of the given qualified name and namespace URI.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Attr createAttributeNS(string namespaceURI, string qualifiedName);
+    /++
+    +   Creates an `EntityReference` object. In addition, if the referenced entity
+    +   is known, the child list of the `EntityReference` node is made the same as
+    +   that of the corresponding `Entity` node.
+    +/
+    EntityReference createEntityReference(string name);
+
+    /++
+    +   Returns a `NodeList` of all the `Element`s in document order with a given
+    +   tag name and are contained in the document.
+    +/
+    NodeList getElementsByTagName(string tagname);
+    /++
+    +   Returns a `NodeList` of all the `Element`s with a given local name and
+    +   namespace URI in document order.
+    +/
+    NodeList getElementsByTagNameNS(string namespaceURI, string localName);
+    /++
+    +   Returns the `Element` that has an ID attribute with the given value. If no
+    +   such element exists, this returns `null`. If more than one element has an
+    +   ID attribute with that value, what is returned is undefined.
+    +   The DOM implementation is expected to use the attribute `Attr.isId` to
+    +   determine if an attribute is of type ID.
+    +
+    +   Note: Attributes with the name "ID" or "id" are not of type ID unless so defined.
+    +/
+    Element getElementById(string elementId);
+
+    /++
+    +   Imports a node from another document to this document, without altering or
+    +   removing the source node from the original document; this method creates a
+    +   new copy of the source node. The returned node has no parent; (`parentNode` is `null`).
+    +
+    +   For all nodes, importing a node creates a node object owned by the importing
+    +   document, with attribute values identical to the source node's `nodeName` and
+    +   `nodeType`, plus the attributes related to namespaces (`prefix`, `localName`,
+    +   and `namespaceURI`). As in the `cloneNode` operation, the source node is
+    +   not altered. User data associated to the imported node is not carried over.
+    +   However, if any `UserData` handlers has been specified along with the associated
+    +   data these handlers will be called with the appropriate parameters before this
+    +   method returns.
+    +/
+    Node importNode(Node importedNode, bool deep);
+    /++
+    +   Moves node from another document, and returns it. Throws "NotSupportedError" DOMException if node is a
+    +   document, or a "HierarchyRequestError" DOMException if node is a shadow root.
+    +/
+    Node adoptNode(Node source);
+
+    /++
+    +   An attribute specifying the encoding used for this document at the time of
+    +   the parsing. This is `null` when it is not known, such as when the `Document`
+    +   was created in memory.
+    +/
+    @property string inputEncoding();
+    /++
+    +   An attribute specifying, as part of the XML declaration, the encoding of
+    +   this document. This is `null` when unspecified or when it is not known,
+    +   such as when the Document was created in memory.
+    +/
+    @property string xmlEncoding();
+
+    /++
+    +   An attribute specifying, as part of the XML declaration, whether this document
+    +   is standalone. This is `false` when unspecified.
+    +/
+    @property bool xmlStandalone();
+    /// ditto
+    @property void xmlStandalone(bool);
+
+    /++
+    +   An attribute specifying, as part of the XML declaration, the version number
+    +   of this document. If there is no declaration and if this document supports
+    +   the "XML" feature, the value is "1.0". If this document does not support
+    +   the "XML" feature, the value is always `null`.
+    +/
+    @property string xmlVersion();
+    /// ditto
+    @property void xmlVersion(string);
+
+    /++
+    +   An attribute specifying whether error checking is enforced or not.
+    +   When set to `false`, the implementation is free to not test every possible
+    +   error case normally defined on DOM operations, and not raise any `DOMException`
+    +   on DOM operations or report errors while using `Document.normalizeDocument()`.
+    +   In case of error, the behavior is undefined. This attribute is `true` by default.
+    +/
+    @property bool strictErrorChecking();
+    /// ditto
+    @property void strictErrorChecking(bool);
+
+    /++
+    +   The location of the document or `null` if undefined or if the `Document`
+    +   was created using `DOMImplementation.createDocument`. No lexical checking
+    +   is performed when setting this attribute; this could result in a `null`
+    +   value returned when using `Node.baseURI`.
+    +/
+    @property string documentURI();
+    /// ditto
+    @property void documentURI(string);
+
+    /// The configuration used when `Document.normalizeDocument()` is invoked.
+    @property DOMConfiguration domConfig();
+    /++
+    +   This method acts as if the document was going through a save and load cycle,
+    +   putting the document in a "normal" form. As a consequence, this method
+    +   updates the replacement tree of `EntityReference` nodes and normalizes `Text`
+    +   nodes, as defined in the method Node.normalize().
+    +/
+    void normalizeDocument();
+    /++
+    +   Rename an existing node of type `ELEMENT` or `ATTRIBUTE`.
+    +
+    +   When possible this simply changes the name of the given node, otherwise
+    +   this creates a new node with the specified name and replaces the existing
+    +   node with the new node as described below.
+    +   If simply changing the name of the given node is not possible, the following
+    +   operations are performed: a new node is created, any registered event
+    +   listener is registered on the new node, any user data attached to the old
+    +   node is removed from that node, the old node is removed from its parent
+    +   if it has one, the children are moved to the new node, if the renamed node
+    +   is an `Element` its attributes are moved to the new node, the new node is
+    +   inserted at the position the old node used to have in its parent's child
+    +   nodes list if it has one, the user data that was attached to the old node
+    +   is attached to the new node.
+    +/
+    Node renameNode(Node n, string namespaceURI, string qualifiedName);
+}
+
+/++
++   The `Node` interface is the primary datatype for the entire Document Object Model.
++   It represents a single node in the document tree. While all objects implementing
++   the `Node` interface expose methods for dealing with children, not all objects
++   implementing the `Node` interface may have children. For example, `Text` nodes
++   may not have children, and adding children to such nodes results in a `DOMException`
++   being raised.
++
++   The attributes `nodeName`, `nodeValue` and `attributes` are included as a mechanism
++   to get at node information without casting down to the specific derived interface.
++   In cases where there is no obvious mapping of these attributes for a specific `nodeType`
++   (e.g., `nodeValue` for an `Element` or attributes for a `Comment`), this returns `null`.
++   Note that the specialized interfaces may contain additional and more convenient
++   mechanisms to get and set the relevant information.
++/
+interface Node
+{
+    /// A code representing the type of the underlying object.
+    @property NodeType nodeType();
+    /// The name of this node, depending on its type.
+    @property string nodeName();
+    /++
+    +   Returns the local part of the qualified name of this node.
+    +
+    +   For nodes of any type other than `ELEMENT` and `ATTRIBUTE` and nodes created
+    +   with a DOM Level 1 method, such as `Document.createElement`, this is always `null`.
+    +/
+    @property string localName();
+    /++
+    +   The namespace prefix of this node, or `null` if it is unspecified.
+    +   When it is defined to be `null`, setting it has no effect, including if
+    +   the node is read-only.
+    +   Note that setting this attribute, when permitted, changes the `nodeName`
+    +   attribute, which holds the qualified name, as well as the `tagName` and
+    +   `name` attributes of the `Element` and `Attr` interfaces, when applicable.
+    +   Setting the prefix to `null` makes it unspecified, setting it to an empty
+    +   string is implementation dependent.
+    +   Note also that changing the prefix of an attribute that is known to have a
+    +   default value, does not make a new attribute with the default value and the
+    +   original prefix appear, since the `namespaceURI` and `localName` do not change.
+    +   For nodes of any type other than `ELEMENT` and `ATTRIBUTE` and nodes created
+    +   with a DOM Level 1 method, such as `createElement` from the `Document`
+    +   interface, this is always `null`.
+    +/
+    @property string prefix();
+    /// ditto
+    @property void prefix(string);
+    /++
+    +   The namespace URI of this node, or `null` if it is unspecified.
+    +   This is not a computed value that is the result of a namespace lookup based
+    +   on an examination of the namespace declarations in scope. It is merely the
+    +   namespace URI given at creation time.
+    +   For nodes of any type other than `ELEMENT` and `ATTRIBUTE` and nodes created
+    +   with a DOM Level 1 method, such as `Document.createElement`, this is always `null`.
+    +/
+    @property string namespaceURI();
+    /// The absolute base URI of this node or null if the implementation wasn't able to obtain an absolute URI
+    @property string baseURI();
+
+    /// The value of this node, depending on its type.
+    @property string nodeValue();
+    /// ditto
+    @property void nodeValue(string);
+    /// Returns the text content, if there's any.
+    @property string textContent();
+    /// Sets the text content, it there's any.
+    @property void textContent(string);
+
+    /++
+    +   The parent of this node. All nodes, except `Attr`, `Document`, `DocumentFragment`,
+    +   `Entity`, and `Notation` may have a parent. However, if a node has just been
+    +   created and not yet added to the tree, or if it has been removed from the tree,
+    +   this is `null`.
+    +/
+    @property Node parentNode();
+    /// A `NodeList` that contains all children of this node. If there are no children, this is a `NodeList` containing no nodes.
+    @property NodeList childNodes();
+    /// The first child of this node. If there is no such node, this returns `null`.
+    @property Node firstChild();
+    /// The last child of this node. If there is no such node, this returns `null`.
+    @property Node lastChild();
+    /// The node immediately preceding this node. If there is no such node, this returns `null`.
+    @property Node previousSibling();
+    /// The node immediately following this node. If there is no such node, this returns `null`.
+    @property Node nextSibling();
+    /++
+    +   The `Document` object associated with this node. This is also the `Document`
+    +   object used to create new nodes. When this node is a `Document` or a `DocumentType`
+    +   which is not used with any `Document` yet, this is `null`.
+    +/
+    @property Document ownerDocument();
+
+    /// A `NamedNodeMap` containing the attributes of this node (if it is an `Element`) or `null` otherwise.
+    @property NamedNodeMap attributes();
+    /// Returns whether this node (if it is an element) has any attributes.
+    bool hasAttributes();
+
+    /++
+    +   Inserts the node `newChild` before the existing child node `refChild`.
+    +   If `refChild` is `null`, insert `newChild` at the end of the list of children.
+    +   If `newChild` is a `DocumentFragment` object, all of its children are inserted,
+    +   in the same order, before `refChild`. If the `newChild` is already in the
+    +   tree, it is first removed.
+    +/
+    Node insertBefore(Node newChild, Node refChild);
+    /++
+    +   Replaces the child node `oldChild` with `newChild` in the list of children,
+    +   and returns the `oldChild` node.
+    +   If `newChild` is a `DocumentFragment` object, `oldChild` is replaced by
+    +   all of the `DocumentFragment` children, which are inserted in the same
+    +   order. If the `newChild` is already in the tree, it is first removed.
+    +/
+    Node replaceChild(Node newChild, Node oldChild);
+    /// Removes the child node indicated by `oldChild` from the list of children, and returns it.
+    Node removeChild(Node oldChild);
+    Node appendChild(Node newChild);
+    /// Returns whether this node has any children.
+    bool hasChildNodes();
+
+    /++
+    +   Returns a duplicate of this node, i.e., serves as a generic copy constructor
+    +   for nodes. The duplicate node has no parent (`parentNode` is `null`) and no
+    +   user data. User data associated to the imported node is not carried over.
+    +   However, if any `UserData` handlers has been specified along with the
+    +   associated data these handlers will be called with the appropriate parameters
+    +   before this method returns.
+    +/
+    Node cloneNode(bool deep);
+    bool isSameNode(Node other);
+    bool isEqualNode(Node arg);
+
+    /++
+    +   Puts all `Text` nodes in the full depth of the sub-tree underneath this
+    +   `Node`, including attribute nodes, into a "normal" form where only structure
+    +   (e.g., elements, comments, processing instructions, CDATA sections, and entity
+    +   references) separates `Text` nodes, i.e., there are neither adjacent `Text`
+    +   nodes nor empty `Text` nodes. This can be used to ensure that the DOM view
+    +   of a document is the same as if it were saved and re-loaded.
+    +/
+    void normalize();
+
+    /// Tests whether the DOM implementation implements a specific feature and that feature is supported by this node.
+    bool isSupported(string feature, string version_);
+    Object getFeature(string feature, string version_);
+
+    /++
+    +   Retrieves the object associated to a key on a this node. The object must
+    +   first have been set to this node by calling `setUserData` with the same key.
+    +/
+    UserData getUserData(string key) @trusted;
+    /++
+    +   Associate an object to a key on this node.
+    +   The object can later be retrieved from this node by calling `getUserData` with the same key.
+    +/
+    UserData setUserData(string key, UserData data, UserDataHandler handler) @trusted;
+
+    /++
+    +   Compares the reference node, i.e. the node on which this method is being
+    +   called, with a node, i.e. the one passed as a parameter, with regard to
+    +   their position in the document and according to the document order.
+    +/
+    BitFlags!DocumentPosition compareDocumentPosition(Node other) @trusted;
+
+    /++
+    +   Look up the prefix associated to the given namespace URI, starting from this node.
+    +   The default namespace declarations are ignored by this method.
+    +/
+    string lookupPrefix(string namespaceURI);
+    /// Look up the namespace URI associated to the given `prefix`, starting from this node.
+    string lookupNamespaceURI(string prefix);
+    /// This method checks if the specified `namespaceURI` is the default namespace or not.
+    bool isDefaultNamespace(string namespaceURI);
+}
+
+/++
++   The `NodeList` interface provides the abstraction of an ordered collection of
++   nodes, without defining or constraining how this collection is implemented.
++   `NodeList` objects in the DOM are live.
++
++   The items in the `NodeList` are accessible via an integral index, starting from `0`.
++/
+interface NodeList
+{
+    /++
+    +   Returns the `index`th item in the collection. If `index` is greater than
+    +   or equal to the number of nodes in the list, this returns `null`.
+    +/
+    Node item(size_t index);
+    /++
+    +   The number of nodes in the list. The range of valid child node indices is
+    +   `0` to `length-1` inclusive.
+    +/
+    @property size_t length();
+
+    final int opApply(int delegate(Node) @safe foreachBody)
     {
-        import core.exception : AssertError;
-        import std.exception : enforce;
-        auto temp = entityRange.save;
-        auto dom = parseDOM(temp);
-        enforce!AssertError(dom.type == EntityType.elementStart, "unittest 1", __FILE__, line);
-        enforce!AssertError(dom.children.length == expected.length, "unittest 2", __FILE__, line);
-        foreach(i; 0 .. dom._children.length)
-            enforce!AssertError(dom._children[i].type == expected[i], "unittest 3", __FILE__, line);
-        enforce!AssertError(dom.pos == TextPos(row, col), "unittest 4", __FILE__, line);
-        if(!entityRange.empty)
-            entityRange.popFront();
+        for (size_t i = 0; i < length; i++)
+        {
+            auto result = foreachBody(item(i));
+            if (result)
+            {
+                return result;
+            }
+        }
+        return 0;
+    }
+}
+
+/++
++   Objects implementing the `NamedNodeMap` interface are used to represent collections
++   of nodes that can be accessed by name. Note that `NamedNodeMap` does not inherit
++   from `NodeList`; `NamedNodeMaps` are not maintained in any particular order.
++   Objects contained in an object implementing `NamedNodeMap` may also be accessed
++   by an ordinal index, but this is simply to allow convenient enumeration of the
++   contents of a `NamedNodeMap`, and does not imply that the DOM specifies an order
++   to these `Node`s.
++
++   `NamedNodeMap` objects in the DOM are live.
++/
+interface NamedNodeMap
+{
+    /++
+    +   Returns the `index`th item in the collection. If `index` is greater than
+    +   or equal to the number of nodes in the list, this returns `null`.
+    +/
+    Node item(size_t index);
+    /++
+    +   The number of nodes in the list. The range of valid child node indices is
+    +   `0` to `length-1` inclusive.
+    +/
+    @property size_t length();
+
+    final int opApply(int delegate(Node) @safe foreachBody)
+    {
+        for (size_t i = 0; i < length; i++)
+        {
+            auto result = foreachBody(item(i));
+            if (result)
+            {
+                return result;
+            }
+        }
+        return 0;
     }
 
-    static foreach(func; testRangeFuncs)
-    {{
-        {
-            foreach(i, xml; ["<!-- comment -->\n" ~
-                             "<?pi foo?>\n" ~
-                             "<su></su>",
-                            "<!-- comment -->\n" ~
-                             "<?pi foo?>\n" ~
-                             "<su/>"])
-            {
-                auto range = parseXML(func(xml));
-                foreach(j; 0 .. 4 - i)
-                {
-                    auto temp = range.save;
-                    auto dom = parseDOM(temp);
-                    assert(dom.type == EntityType.elementStart);
-                    assert(dom.children.length == 3 - j);
-                    if(j <= 2)
-                    {
-                        assert(dom.children[2 - j].type ==
-                               (i == 0 ? EntityType.elementStart : EntityType.elementEmpty));
-                        assert(equal(dom.children[2 - j].name, "su"));
-                        if(j <= 1)
-                        {
-                            assert(dom.children[1 - j].type == EntityType.pi);
-                            assert(equal(dom.children[1 - j].name, "pi"));
-                            assert(equal(dom.children[1 - j].text, "foo"));
-                            if(j == 0)
-                            {
-                                assert(dom.children[0].type == EntityType.comment);
-                                assert(equal(dom.children[0].text, " comment "));
-                            }
-                        }
-                    }
-                    range.popFront();
-                }
-                assert(range.empty);
-                auto dom = parseDOM(range);
-                assert(dom.type == EntityType.elementStart);
-                assert(dom.name is typeof(dom.name).init);
-                assert(dom.children.length == 0);
-            }
-        }
-        {
-            auto xml = "<root>\n" ~
-                       "    <foo>\n" ~
-                       "        <bar>\n" ~
-                       "            <baz>\n" ~
-                       "            It's silly, Charley\n" ~
-                       "            </baz>\n" ~
-                       "            <frobozz>\n" ~
-                       "                <is>the Wiz</is>\n" ~
-                       "            </frobozz>\n" ~
-                       "            <empty></empty>\n" ~
-                       "            <xyzzy/>\n" ~
-                       "        </bar>\n" ~
-                       "    </foo>\n" ~
-                       "    <!--This isn't the end-->\n" ~
-                       "</root>\n" ~
-                       "<?Poirot?>\n" ~
-                       "<!--It's the end!-->";
+    final Node opIndex(size_t index)
+    {
+        return item(index);
+    }
 
-            {
-                auto range = parseXML(func(xml));
-                with(EntityType)
-                {
-                    testChildren(range, 1, 1, elementStart, pi, comment); // <root>
-                    testChildren(range, 2, 5, elementStart, comment); // <foo>
-                    testChildren(range, 3, 9, elementStart); // <bar>
-                    testChildren(range, 4, 13, elementStart, elementStart, elementStart, elementEmpty); // <baz>
-                    testChildren(range, 4, 18, text); // It's silly, Charley
-                    testChildren(range, 6, 13); // </baz>
-                    testChildren(range, 7, 13, elementStart, elementStart, elementEmpty); // <frobozz>
-                    testChildren(range, 8, 17, elementStart); // <is>
-                    testChildren(range, 8, 21, text); // the Wiz
-                    testChildren(range, 8, 28); // </is>
-                    testChildren(range, 9, 13); // </frobozz>
-                    testChildren(range, 10, 13, elementStart, elementEmpty); // <empty>
-                    testChildren(range, 10, 20); // </empty>
-                    testChildren(range, 11, 13, elementEmpty); // <xyzzy/>
-                    testChildren(range, 12, 9); // </bar>
-                    testChildren(range, 13, 5); // </foo>
-                    testChildren(range, 14, 5, comment); // <!--This isn't the end-->
-                    testChildren(range, 15, 1); // </root>
-                    testChildren(range, 16, 1, pi, comment); // <?Poirot?>
-                    testChildren(range, 17, 1, comment); // <!--It's the end-->"
-                    testChildren(range, 1, 1); // empty range
-                }
-            }
-            {
-                auto dom = parseDOM(func(xml));
-                assert(dom.children.length == 3);
+    /// Retrieves a node specified by name.
+    Node getNamedItem(string name);
+    /++
+    +   Adds a node using its `nodeName` attribute. If a node with that name is
+    +   already present in this map, it is replaced by the new one. Replacing a
+    +   node by itself has no effect.
+    +   As the `nodeName` attribute is used to derive the name which the node must
+    +   be stored under, multiple nodes of certain types (those that have a "special"
+    +   string value) cannot be stored as the names would clash. This is seen as
+    +   preferable to allowing nodes to be aliased.
+    +/
+    Node setNamedItem(Node arg);
+    /++
+    +   Removes a node specified by name. When this map contains the attributes
+    +   attached to an element, if the removed attribute is known to have a default
+    +   value, an attribute immediately appears containing the default value as
+    +   well as the corresponding namespace URI, local name, and prefix when applicable.
+    +/
+    Node removeNamedItem(string name);
 
-                auto root = dom.children[0];
-                assert(root.type == EntityType.elementStart);
-                assert(root.pos == TextPos(1, 1));
-                assert(root.children.length == 2);
-                assert(equal(root.name, "root"));
+    /++
+    +   Retrieves a node specified by local name and namespace URI.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Node getNamedItemNS(string namespaceURI, string localName);
+    /++
+    +   Adds a node using its `namespaceURI` and `localName`. If a node with that
+    +   namespace URI and that local name is already present in this map, it is
+    +   replaced by the new one. Replacing a node by itself has no effect.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the namespaceURI parameter for methods if they wish to have no namespace.
+    +/
+    Node setNamedItemNS(Node arg);
+    /++
+    +   Removes a node specified by local name and namespace URI. A removed attribute
+    +   may be known to have a default value when this map contains the attributes attached
+    +   to an element, as returned by the attributes attribute of the `Node` interface.
+    +   If so, an attribute immediately appears containing the default value as well
+    +   as the corresponding namespace URI, local name, and prefix when applicable.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Node removeNamedItemNS(string namespaceURI, string localName);
+}
 
-                auto foo = root.children[0];
-                assert(foo.type == EntityType.elementStart);
-                assert(foo.pos == TextPos(2, 5));
-                assert(foo.children.length == 1);
-                assert(equal(foo.name, "foo"));
+/++
++   The `CharacterData` interface extends `Node` with a set of attributes and methods
++   for accessing character data in the DOM. For clarity this set is defined here
++   rather than on each object that uses these attributes and methods. No DOM objects
++   correspond directly to `CharacterData`, though `Text` and others do inherit
++   the interface from it. All offsets in this interface start from `0`.
++/
+interface CharacterData : Node
+{
+    @property string data();
+    @property void data(string);
 
-                auto bar = foo.children[0];
-                assert(bar.type == EntityType.elementStart);
-                assert(bar.pos == TextPos(3, 9));
-                assert(bar.children.length == 4);
-                assert(equal(bar.name, "bar"));
+    @property size_t length();
 
-                auto baz = bar.children[0];
-                assert(baz.type == EntityType.elementStart);
-                assert(baz.pos == TextPos(4, 13));
-                assert(baz.children.length == 1);
-                assert(equal(baz.name, "baz"));
+    /// Extracts a substring of `data` starting at `offset`, with length `count`.
+    string substringData(size_t offset, size_t count);
+    /++
+    +   Append the string to the end of the character data of the node. Upon success,
+    +   data provides access to the concatenation of data and the string specified.
+    +/
+    void appendData(string arg);
+    /// Insert a string at the specified offset.
+    void insertData(size_t offset, string arg);
+    /// Remove a range of characters from the node. Upon success, `data` and `length` reflect the change.
+    void deleteData(size_t offset, size_t count);
+    /// Replace `count` characters starting at the specified offset with the specified string.
+    void replaceData(size_t offset, size_t count, string arg);
+}
 
-                auto silly = baz.children[0];
-                assert(silly.type == EntityType.text);
-                assert(silly.pos == TextPos(4, 18));
-                assert(equal(silly.text, "\n            It's silly, Charley\n            "));
+/++
++   The `Attr` interface represents an attribute in an `Element` object. Typically
++   the allowable values for the attribute are defined in a schema associated with the document.
++
++   `Attr` objects inherit the `Node` interface, but since they are not actually
++   child nodes of the element they describe, the DOM does not consider them part
++   of the document tree. Thus, the `Node` attributes `parentNode`, `previousSibling`
++   and `nextSibling` have a `null` value for `Attr` objects. The DOM takes the
++   view that attributes are properties of elements rather than having a separate
++   identity from the elements they are associated with; this should make it more
++   efficient to implement such features as default attributes associated with all
++   elements of a given type. Furthermore, `Attr` nodes may not be immediate children
++   of a `DocumentFragment`. However, they can be associated with `Element` nodes
++   contained within a `DocumentFragment`. In short, users and implementors of the
++   DOM need to be aware that `Attr` nodes have some things in common with other
++   objects inheriting the `Node` interface, but they also are quite distinct.
++/
+interface Attr : Node
+{
+    /++
+    +   Returns the _name of this attribute. If `Node.localName` is different from
+    +   `null`, this attribute is a qualified name.
+    +/
+    @property string name();
+    /++
+    +   `true` if this attribute was explicitly given a value in the instance document,
+    +   `false` otherwise. If the application changed the value of this attribute
+    +   node (even if it ends up having the same value as the default value) then
+    +   it is set to `true`. The implementation may handle attributes with default
+    +   values from other schemas similarly but applications should use `Document.normalizeDocument`
+    +   to guarantee this information is up-to-date.
+    +/
+    @property bool specified();
+    /++
+    +   On retrieval, the value of the attribute is returned as a `string`.
+    +   Character and general entity references are replaced with their values.
+    +   See also the method `getAttribute` on the `Element` interface.
+    +   On setting, this creates a `Text` node with the unparsed contents of the
+    +   string, i.e. any characters that an XML processor would recognize as markup
+    +   are instead treated as literal text.
+    +   See also the method `Element.setAttribute`.
+    +/
+    @property string value();
+    /// ditto
+    @property void value(string);
 
-                auto frobozz = bar.children[1];
-                assert(frobozz.type == EntityType.elementStart);
-                assert(frobozz.pos == TextPos(7, 13));
-                assert(frobozz.children.length == 1);
-                assert(equal(frobozz.name, "frobozz"));
+    /// The `Element` node this attribute is attached to or `null` if this attribute is not in use.
+    @property Element ownerElement();
+    /++
+    +   The type information associated with this attribute. While the type information
+    +   contained in this attribute is guarantee to be correct after loading the
+    +   document or invoking `Document.normalizeDocument`, `schemaTypeInfo` may
+    +   not be reliable if the node was moved.
+    +/
+    @property XMLTypeInfo schemaTypeInfo();
+    /++
+    +   Returns whether this attribute is known to be of type ID (i.e. to contain
+    +   an identifier for its owner element) or not. When it is and its value is
+    +   unique, the ownerElement of this attribute can be retrieved using the method
+    +   `Document.getElementById`.
+    +/
+    @property bool isId();
+}
 
-                auto is_ = frobozz.children[0];
-                assert(is_.type == EntityType.elementStart);
-                assert(is_.pos == TextPos(8, 17));
-                assert(is_.children.length == 1);
-                assert(equal(is_.name, "is"));
+/**
+ * Elements are the main building block of an XML document. They have a name, an associated namespace, attributes,
+ * text, and child elements.
+ */
+interface Element : Node
+{
+    /// The name of the element. If `Node.localName` is different from `null`, this attribute is a qualified name.
+    @property string tagName();
 
-                auto wiz = is_.children[0];
-                assert(wiz.type == EntityType.text);
-                assert(wiz.pos == TextPos(8, 21));
-                assert(equal(wiz.text, "the Wiz"));
+    /// Retrieves an attribute value by name.
+    string getAttribute(string name);
+    /++
+    +   Adds a new attribute. If an attribute with that name is already present in
+    +   the element, its value is changed to be that of the value parameter. This
+    +   value is a simple string; it is not parsed as it is being set. So any markup
+    +   (such as syntax to be recognized as an entity reference) is treated as
+    +   literal text, and needs to be appropriately escaped by the implementation
+    +   when it is written out. In order to assign an attribute value that contains
+    +   entity references, the user must create an `Attr` node plus any `Text` and
+    +   `EntityReference` nodes, build the appropriate subtree, and use `setAttributeNode`
+    +   to assign it as the value of an attribute.
+    +   To set an attribute with a qualified name and namespace URI, use the `setAttributeNS` method.
+    +/
+    void setAttribute(string name, string value);
 
-                auto empty = bar.children[2];
-                assert(empty.type == EntityType.elementStart);
-                assert(empty.pos == TextPos(10, 13));
-                assert(empty.children.length == 0);
-                assert(equal(empty.name, "empty"));
+    /++
+    +   Removes an attribute by name. If a default value for the removed attribute
+    +   is defined in the DTD, a new attribute immediately appears with the default
+    +   value as well as the corresponding namespace URI, local name, and prefix
+    +   when applicable.
+    +   To remove an attribute by local name and namespace URI, use the `removeAttributeNS` method.
+    +/
+    void removeAttribute(string name);
 
-                auto xyzzy = bar.children[3];
-                assert(xyzzy.type == EntityType.elementEmpty);
-                assert(xyzzy.pos == TextPos(11, 13));
-                assert(equal(xyzzy.name, "xyzzy"));
+    /// Retrieves an attribute node by name.
+    Attr getAttributeNode(string name);
 
-                auto comment = root.children[1];
-                assert(comment.type == EntityType.comment);
-                assert(comment.pos == TextPos(14, 5));
-                assert(equal(comment.text, "This isn't the end"));
+    /++
+    +   Adds a new attribute node. If an attribute with that name (`nodeName`) is
+    +   already present in the element, it is replaced by the new one. Replacing an
+    +   attribute node by itself has no effect.
+    +   To add a new attribute node with a qualified name and namespace URI, use
+    +   the `setAttributeNodeNS` method.
+    +/
+    Attr setAttributeNode(Attr newAttr);
 
-                auto poirot = dom.children[1];
-                assert(poirot.type == EntityType.pi);
-                assert(poirot.pos == TextPos(16, 1));
-                assert(equal(poirot.name, "Poirot"));
-                assert(poirot.text.empty);
+    /++
+    +   Removes the specified attribute node. If a default value for the removed attribute
+    +   is defined in the DTD, a new attribute immediately appears with the default
+    +   value as well as the corresponding namespace URI, local name, and prefix
+    +   when applicable.
+    +/
+    Attr removeAttributeNode(Attr oldAttr);
 
-                auto endComment = dom.children[2];
-                assert(endComment.type == EntityType.comment);
-                assert(endComment.pos == TextPos(17, 1));
-                assert(equal(endComment.text, "It's the end!"));
-            }
-        }
-    }}
+    /++
+    +   Retrieves an attribute value by local name and namespace URI.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    string getAttributeNS(string namespaceURI, string localName);
+
+    /++
+    +   Adds a new attribute. If an attribute with the same local name and namespace
+    +   URI is already present on the element, its prefix is changed to be the prefix
+    +   part of the qualifiedName, and its value is changed to be the value parameter.
+    +   This value is a simple string; it is not parsed as it is being set. So any markup
+    +   (such as syntax to be recognized as an entity reference) is treated as
+    +   literal text, and needs to be appropriately escaped by the implementation
+    +   when it is written out. In order to assign an attribute value that contains
+    +   entity references, the user must create an `Attr` node plus any `Text` and
+    +   `EntityReference` nodes, build the appropriate subtree, and use `setAttributeNode`
+    +   to assign it as the value of an attribute.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    void setAttributeNS(string namespaceURI, string qualifiedName, string value);
+
+    /++
+    +   Removes an attribute by local name and namespace URI. If a default value
+    +   for the removed attribute is defined in the DTD, a new attribute immediately
+    +   appears with the default value as well as the corresponding namespace URI,
+    +   local name, and prefix when applicable.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    void removeAttributeNS(string namespaceURI, string localName);
+
+    /++
+    +   Retrieves an `Attr` node by local name and namespace URI.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Attr getAttributeNodeNS(string namespaceURI, string localName);
+
+    /++
+    +   Adds a new attribute. If an attribute with that local name and that namespace
+    +   URI is already present in the element, it is replaced by the new one. Replacing
+    +   an attribute node by itself has no effect.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    Attr setAttributeNodeNS(Attr newAttr);
+
+    /// Returns `true` when an attribute with a given `name` is specified on this element or has a default value, `false` otherwise.
+    bool hasAttribute(string name);
+
+    /++
+    +   Returns `true` when an attribute with a given `localName` and `namespaceURI`
+    +   is specified on this element or has a default value, `false` otherwise.
+    +   Per the XML Namespaces specification, applications must use the value `null`
+    +   as the `namespaceURI` parameter for methods if they wish to have no namespace.
+    +/
+    bool hasAttributeNS(string namespaceURI, string localName);
+
+    /++
+    +   If the parameter `isId` is `true`, this method declares the specified
+    +   attribute to be a user-determined ID attribute. This affects the value of
+    +   `Attr.isId` and the behavior of `Document.getElementById`, but does not
+    +   change any schema that may be in use, in particular this does not affect
+    +   the `Attr.schemaTypeInfo` of the specified `Attr` node. Use the value `false`
+    +   for the parameter `isId` to undeclare an attribute for being a user-determined ID attribute.
+    +/
+    void setIdAttribute(string name, bool isId);
+
+    /// ditto
+    void setIdAttributeNS(string namespaceURI, string localName, bool isId);
+
+    /// ditto
+    void setIdAttributeNode(Attr idAttr, bool isId);
+
+    /// Returns a `NodeList` of all descendant `Element`s with a given tag name, in document order.
+    NodeList getElementsByTagName(string name);
+
+    /// Returns a `NodeList` of all the descendant `Element`s with a given local name and namespace URI in document order.
+    NodeList getElementsByTagNameNS(string namespaceURI, string localName);
+
+    /// The type information associated with this element.
+    @property XMLTypeInfo schemaTypeInfo();
+}
+
+/++
++   The `Text` interface inherits from `CharacterData` and represents the textual
++   content (termed character data in XML) of an `Element` or `Attr`. If there is
++   no markup inside an element's content, the text is contained in a single object
++   implementing the `Text` interface that is the only child of the element. If
++   there is markup, it is parsed into the information items (elements, comments,
++   etc.) and `Text` nodes that form the list of children of the element.
++/
+interface Text : CharacterData
+{
+    /++
+    +   Breaks this node into two nodes at the specified `offset`, keeping both
+    +   in the tree as siblings. After being split, this node will contain all
+    +   the content up to the `offset` point. A new node of the same type, which
+    +   contains all the content at and after the `offset` point, is returned.
+    +   If the original node had a parent node, the new node is inserted as the
+    +   next sibling of the original node. When the `offset` is equal to the length
+    +   of this node, the new node has no data.
+    +/
+    Text splitText(size_t offset);
+
+    /// Returns whether this text node contains element content whitespace, often abusively called "ignorable whitespace".
+    @property bool isElementContentWhitespace();
+
+    /// Returns the combined data of all direct text node siblings.
+    @property string wholeText();
+
+    /// Couldn't find in DOM documentation, but leavint it there.
+    Text replaceWholeText(string content);
+}
+
+/++
++   This interface inherits from `CharacterData` and represents the content of a
++   comment, i.e., all the characters between the starting '<!--' and ending '-->'.
++/
+interface Comment : CharacterData
+{
+}
+
+/++
++   The `TypeInfo` interface represents a type referenced from `Element` or `Attr`
++   nodes, specified in the schemas associated with the document. The type is a
++   pair of a namespace URI and name properties, and depends on the document's schema.
++/
+interface XMLTypeInfo
+{
+    @property string typeName();
+    @property string typeNamespace();
+
+    bool isDerivedFrom(string typeNamespaceArg, string typeNameArg,
+            DerivationMethod derivationMethod);
+}
+
+/// DOMError is an interface that describes an error.
+interface DOMError
+{
+    @property ErrorSeverity severity();
+    @property string message();
+    @property string type();
+    @property Object relatedException();
+    @property Object relatedData();
+    @property DOMLocator location();
+}
+
+/// `DOMLocator` is an interface that describes a location (e.g. where an error occurred).
+interface DOMLocator
+{
+    @property long lineNumber();
+    @property long columnNumber();
+    @property long byteOffset();
+    @property Node relatedNode();
+    @property string uri();
+}
+
+/++
++   The `DOMConfiguration` interface represents the configuration of a document
++   and maintains a table of recognized parameters. Using the configuration, it
++   is possible to change `Document.normalizeDocument` behavior, such as replacing
++   the `CDATASection` nodes with `Text` nodes or specifying the type of the schema
++   that must be used when the validation of the `Document` is requested.
++/
+interface DOMConfiguration
+{
+    void setParameter(string name, UserData value) @trusted;
+    UserData getParameter(string name) @trusted;
+    bool canSetParameter(string name, UserData value) @trusted;
+    @property stringList parameterNames();
+}
+
+/++
++   CDATA sections are used to escape blocks of text containing characters that would
++   otherwise be regarded as markup. The only delimiter that is recognized in a CDATA
++   section is the "]]>" string that ends the CDATA section. CDATA sections cannot be nested.
++   Their primary purpose is for including material such as XML fragments, without
++   needing to escape all the delimiters.
++
++   The `CDATASection` interface inherits from the `CharacterData` interface through
++   the `Text` interface. Adjacent `CDATASection` nodes are not merged by use of the
++   normalize method of the `Node` interface.
++/
+interface CDATASection : Text
+{
+}
+
+/++
++   Each `Document` has a `doctype` attribute whose value is either `null` or a
++   `DocumentType` object. The `DocumentType` interface in the DOM Core provides
++   an interface to the list of entities that are defined for the document, and
++   little else because the effect of namespaces and the various XML schema efforts
++   on DTD representation are not clearly understood as of this writing.
++
++   DOM Level 3 doesn't support editing `DocumentType` nodes. `DocumentType` nodes are read-only.
++/
+interface DocumentType : Node
+{
+    /// The name of DTD; i.e., the name immediately following the `DOCTYPE` keyword.
+    @property string name();
+
+    /++
+    +   A `NamedNodeMap` containing the general entities, both external and internal,
+    +   declared in the DTD. Parameter entities are not contained. Duplicates are discarded.
+    +/
+    @property NamedNodeMap entities();
+
+    /++
+    +   A `NamedNodeMap` containing the notations declared in the DTD. Duplicates are discarded.
+    +   Every node in this map also implements the `Notation` interface.
+    +/
+    @property NamedNodeMap notations();
+
+    /// The public identifier of the external subset.
+    @property string publicId();
+
+    /// The system identifier of the external subset. This may be an absolute URI or not.
+    @property string systemId();
+
+    /++
+    +   The internal subset as a string, or `null` if there is none.
+    +   This is does not contain the delimiting square brackets.
+    +
+    +   Note:
+    +   The actual content returned depends on how much information is available
+    +   to the implementation. This may vary depending on various parameters,
+    +   including the XML processor used to build the document.
+    +/
+    @property string internalSubset();
+}
+
+/++
++   This interface represents a notation declared in the DTD. A notation either
++   declares, by name, the format of an unparsed entity or is used for formal
++   declaration of processing instruction targets. The `nodeName` attribute
++   inherited from `Node` is set to the declared name of the notation.
++
++   The DOM Core does not support editing `Notation` nodes; they are therefore readonly.
++
++   A `Notation` node does not have any parent.
++/
+interface Notation : Node
+{
+    /// The public identifier of this notation. If the public identifier was not specified, this is `null`.
+    @property string publicId();
+
+    /++
+    +   The system identifier of this notation. If the system identifier was not
+    +   specified, this is `null`. This may be an absolute URI or not.
+    +/
+    @property string systemId();
+}
+
+/++
++   This interface represents a known entity, either parsed or unparsed, in an XML
++   document. Note that this models the entity itself not the entity declaration.
++
++   The `nodeName` attribute that is inherited from `Node` contains the name of the entity.
++
++   An XML processor may choose to completely expand entities before the structure
++   model is passed to the DOM; in this case there will be no `EntityReference`
++   nodes in the document tree.
++
++   DOM Level 3 does not support editing `Entity` nodes; if a user wants to make
++   changes to the contents of an `Entity`, every related `EntityReference` node
++   has to be replaced in the structure model by a clone of the `Entity`'s contents,
++   and then the desired changes must be made to each of those clones instead.
++   `Entity` nodes and all their descendants are readonly.
++
++   DOM Level 4 has deprecated the use of entities, but kept for DTD processing reasons.
++
++   An `Entity` node does not have any parent.
++/
+interface Entity : Node
+{
+    /// The public identifier associated with the entity if specified, and `null` otherwise.
+    @property string publicId();
+
+    /++
+    +   The system identifier associated with the entity if specified, and `null` otherwise.
+    +   This may be an absolute URI or not.
+    +/
+    @property string systemId();
+
+    /// For unparsed entities, the name of the `Notation` for the entity. For parsed entities, this is `null`.
+    @property string notationName();
+
+    /++
+    +   An attribute specifying the encoding used for this entity at the time of
+    +   parsing, when it is an external parsed entity. This is `null` if it an
+    +   entity from the internal subset or if it is not known.
+    +/
+    @property string inputEncoding();
+
+    /++
+    +   An attribute specifying, as part of the text declaration, the encoding of
+    +   this entity, when it is an external parsed entity. This is `null` otherwise.
+    +/
+    @property string xmlEncoding();
+
+    /++
+    +   An attribute specifying, as part of the text declaration, the version
+    +   number of this entity, when it is an external parsed entity. This is
+    +   `null` otherwise.
+    +/
+    @property string xmlVersion();
+}
+
+/++
++   `EntityReference` nodes may be used to represent an entity reference in the tree.
++   When an `EntityReference` node represents a reference to an unknown entity, the
++   node has no children and its replacement value, when used by `Attr.value` for example, is empty.
++
++   As for `Entity` nodes, `EntityReference` nodes and all their descendants are readonly.
++/
+interface EntityReference : Node
+{
+}
+
+/++
++   The `ProcessingInstruction` interface represents a "processing instruction",
++   used in XML as a way to keep processor-specific information in the text of the document.
++/
+interface ProcessingInstruction : Node
+{
+    /++
+    +   The target of this processing instruction. XML defines this as being the
+    +   first token following the markup that begins the processing instruction.
+    +/
+    @property string target();
+
+    /++
+    +   The content of this processing instruction. This is from the first non white
+    +   space character after the target to the character immediately preceding the `?>`.
+    +/
+    @property string data();
+
+    /// ditto
+    @property void data(string);
 }
