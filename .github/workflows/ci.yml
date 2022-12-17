@@ -22,7 +22,6 @@ jobs:
         compiler:
           - 'dmd-latest'
           - 'ldc-latest'
-          - 'gdc-latest'
     steps:
     - uses: actions/checkout@v2
       with:
