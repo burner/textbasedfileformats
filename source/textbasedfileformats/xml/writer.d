@@ -569,7 +569,7 @@ void writeDOM(WriterType)(auto ref WriterType writer, dom.Node node)
                     ? xmlEncoding.to!StringType()
                     : null
                 , doc.xmlStandalone);
-            foreach (child; doc.childNodes)
+            foreach(child; doc.childNodes)
             {
                 writer.writeDOM(child);
             }

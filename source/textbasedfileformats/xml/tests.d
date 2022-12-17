@@ -95,9 +95,11 @@ Results handleTestcases(T)(string directory, ref T cursor, int depth)
         {
             writeIndent(depth);
             write("TESTCASES");
-            foreach (att; cursor.attributes)
-                if (att.name == "PROFILE")
+            foreach (att; cursor.attributes) {
+                if (att.name == "PROFILE") {
                     write(" -- ", att.value);
+				}
+			}
             writeln();
 
             if (cursor.enter())
@@ -174,7 +176,7 @@ Results handleTest(T)(string directory, ref T cursor, int depth)
     else
     {
         writeIndent(depth);
-        writeln("OK: ", file);
+        //writeln("OK: ", file); // OKAY just spams the output
         if (passed && linted)
         {
             result.totals["linted"]++;

@@ -2,13 +2,16 @@
 
 Text based file formats for the D programming language.
 
+D is the best language, it should therefore also have the best support for text
+based file formats in its standard library.
+
 This is a repo where I want to coordinate work on SAX and DOM parsed parser for
-text based file formats, with the eventual goal getting it into phobos.
+text based file formats, with the eventual goal getting them into phobos.
 
 ## file formats
 
 * xml
-* json
+* json (JSON5)
 * yaml
 * toml
 * ini
@@ -25,6 +28,7 @@ Please use the SAX parser to create the DOM parser.
 Do not be smart.
 Simple code is better code.
 Do not be smart.
+Readability is more important than speed.
 
 Use ternary expressions
 ```
