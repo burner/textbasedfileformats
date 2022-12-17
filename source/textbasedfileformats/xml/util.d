@@ -453,7 +453,9 @@ unittest
     static foreach(func; testRangeFuncs)
     {{
         assert(decodeXML(func("foo")) == "foo");
+		() @trusted { // TODO make @safe
         assert(equal(asDecodedXML(func("foo")), "foo"));
+		}();
     }}
 }
 
@@ -651,9 +653,10 @@ unittest
               $(LREF asDecodedXML)$(BR)
               $(LREF encodeCharRef)
   +/
-Nullable!dchar parseCharRef(R)(ref R range)
-    if(isForwardRange!R && isSomeChar!(ElementType!R))
+Nullable!dchar parseCharRef(R)(ref R range) @trusted
 {
+    static assert(isForwardRange!R);
+	static assert(isSomeChar!(ElementType!R));
     import std.algorithm.searching : startsWith;
     import std.conv : ConvException, parse, to;
     import std.range : popFrontN;
@@ -1416,12 +1419,14 @@ auto encodeText(R)(R text)
     static foreach(func; testRangeFuncs)
     {{
         assert(encodeText(func("")).empty);
-        assert(equal(encodeText(func(`& < > ' "`)), `&amp; &lt; > ' "`));
-        assert(equal(encodeText(func("&&&")), "&amp;&amp;&amp;"));
+		() @trusted { // TODO make @safe
+			assert(equal(encodeText(func(`& < > ' "`)), `&amp; &lt; > ' "`));
+			assert(equal(encodeText(func("&&&")), "&amp;&amp;&amp;"));
 
-        auto range = encodeText(func(`&&<<>>''""hello ] ]> world"">><<&&`));
-        assert(equal(range.save, range.save));
-        assert(equal(range.save, `&amp;&amp;&lt;&lt;>>''""hello ] ]> world"">>&lt;&lt;&amp;&amp;`));
+			auto range = encodeText(func(`&&<<>>''""hello ] ]> world"">><<&&`));
+			assert(equal(range.save, range.save));
+			assert(equal(range.save, `&amp;&amp;&lt;&lt;>>''""hello ] ]> world"">>&lt;&lt;&amp;&amp;`));
+		}();
     }}
 }
 

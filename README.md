@@ -44,3 +44,23 @@ if(condition) {
 
 std.sumtype wherever possible.
 I would even say that all but xml can use the same sumtype object.
+
+No function constraints.
+Function constraints are no good.
+Do not use them. Use static asserts and jump functions.
+
+```
+void someFunc(T)(T t) if(someCondition!T) {
+	/// BAD CODE
+}
+```
+
+```
+void someFunc(T)(T t) {
+	static assert(someCondition!T, "Condition not met by type " ~ T.stringof);
+	/// GOOD CODE
+}
+```
+
+Conditional statements get block statement, aka. every if, foreach, while and so
+are followed by {}.

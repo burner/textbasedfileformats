@@ -2261,10 +2261,18 @@ void checkPIName(R)(R range)
     static foreach(func; testRangeFuncs)
     {
         foreach(str; only("hello", "プログラミング", "h_:llo-.42", "_.", "_-", "_42", "プログラミング", "xmlx"))
-            assertNotThrown!XMLWritingException(checkPIName(func(str)));
+		{
+			() @trusted { // TODO make @safe
+				assertNotThrown!XMLWritingException(checkPIName(func(str)));
+			}();
+		}
 
         foreach(str; only(".", ".foo", "-foo", "&foo;", "foo\vbar", "xml", "XML", "xMl"))
-            assertThrown!XMLWritingException(checkPIName(func(str)));
+		{
+			() @trusted { // TODO make @safe
+				assertThrown!XMLWritingException(checkPIName(func(str)));
+			}();
+		}
     }
 }
 
