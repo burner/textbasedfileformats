@@ -2,6 +2,7 @@
 	"authors": [
 		"burner"
 	],
+	"dflags": ["-d"],
 	"copyright": "Copyright © 2022, burner",
 	"description": "A minimal D application.",
 	"license": "proprietary",

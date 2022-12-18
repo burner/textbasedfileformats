@@ -84,10 +84,20 @@ unittest {
 }
 
 Payload parseJson(string input) {
-	JsonParser jp = JsonParser(input);
-	Payload ret = jp.parse();
+	JsonDomParser jdp;
+	JsonParser jp =
+		{ input: input
+		, onArrayBegin: &jdp.onArrayBegin
+		, onArrayEnd: &jdp.onArrayEnd
+		, onObjectBegin: &jdp.onObjectBegin
+		, onObjectEnd: &jdp.onObjectEnd
+		, onInteger: &jdp.onInteger
+		, onKey: &jdp.onKey
+		, onString: &jdp.onString
+		};
+	jp.parse();
 	enforce(jp.input.empty, "Input not completly consumed");
-	return ret;
+	return jdp.ret;
 }
 
 alias Integer = SumType!
@@ -121,13 +131,34 @@ struct JsonDomParser {
 
 	JsonParser parser;
 
-	void onObjectStart(Position) {
+	Payload parse() {
+		this.parser.parse();
+		return ret;
+	}
+
+	void onObjectBegin(Position) {
 		Payload[string] t;
 		this.stack ~= Payload(t);
 		this.state ~= State.object;
 	}
 
 	void onObjectEnd(Position) {
+		Payload tmp = this.stack.back;
+		this.stack.popBack();
+		if(this.stack.empty) {
+			() @trusted { // TODO
+				this.ret = tmp;
+			}();
+		}
+	}
+
+	void onArrayBegin(Position) {
+		Payload[] t;
+		this.stack ~= Payload(t);
+		this.state ~= State.array;
+	}
+
+	void onArrayEnd(Position) {
 		Payload tmp = this.stack.back;
 		this.stack.popBack();
 		if(this.stack.empty) {
@@ -164,6 +195,23 @@ struct JsonDomParser {
 		}
 	}
 
+	void onFloatingPoint(double d, Position) @trusted {
+		this.stack.back.match!
+			( (ref Payload[string] obj) {
+				obj[this.keyStack.back] = d;
+				return 0;
+			}
+			, (ref Payload[] arr) {
+				arr ~= Payload(d);
+				return 0;
+			}
+			, _ => 0
+		);
+		if(this.state.back == State.object) {
+			this.keyStack.popBack();
+		}
+	}
+
 	void onString(string s, Position) @trusted {
 		this.stack.back.match!
 			( (ref Payload[string] obj) {
@@ -183,7 +231,7 @@ struct JsonDomParser {
 }
 
 struct JsonParser {
-@safe pure:
+@safe:
 	string input;
 	uint row;
 	uint column;
@@ -198,10 +246,6 @@ struct JsonParser {
 	void delegate(bool, Position) onBool;
 	void delegate(double,Position) onFloatingPoint;
 	void delegate(Position) onNull;
-
-	this(string input) {
-		this.input = input;
-	}
 
 	void stripWhitespace() {
 		outer: while(!this.input.empty) {
@@ -222,32 +266,30 @@ struct JsonParser {
 		}
 	}
 
-	Payload parse() {
-		return parseElement();
-	}
-
-	Payload parseElement() {
-		return this.parseValue();
-	}
-
 	Position getCurrentPosition() {
 		return Position(this.row, this.column);
 	}
 
-	Payload parseValue() {
+	void parse() {
+		this.parseValue();
+	}
+
+	void parseValue() {
 		this.stripWhitespace();
 		if(this.input.startsWith("{")) {
-			callIfNotNull(this.onObjectBegin, this.getCurrentPosition());
 			this.input = this.input[1 .. $];
 			this.column++;
-			return this.parseObject();
+			this.parseObject();
+			return;
 		} else if(this.input.startsWith("[")) {
-			callIfNotNull(this.onArrayBegin, this.getCurrentPosition());
 			this.input = this.input[1 .. $];
 			this.column++;
-			return this.parseArray();
+			this.parseArray();
+			return;
 		} else if(this.input.startsWith("\"")) {
-			return Payload(this.parseString());
+			callIfNotNull(this.onString, this.parseString(),
+					this.getCurrentPosition());
+			return;
 		} else if(matches!("null")(this.input)) {
 			callIfNotNull(this.onNull, this.getCurrentPosition());
 			this.column += 4;
@@ -256,43 +298,45 @@ struct JsonParser {
 			() @trusted {
 				ret = null;
 			}();
-			return ret;
+			return;
 		} else if(matches!("false")(this.input)) {
 			callIfNotNull(this.onBool, false, this.getCurrentPosition());
 			this.column += 5;
 			this.input = this.input[5 .. $];
-			return Payload(false);
+			return;
 		} else if(matches!("true")(this.input)) {
 			callIfNotNull(this.onBool, true, this.getCurrentPosition());
 			this.column += 4;
 			this.input = this.input[4 .. $];
-			return Payload(false);
+			return;
 		} else if(!this.input.empty
 			&& ((this.input[0] >= '0' && this.input[0] <= '9')
 				|| this.input[0] == '-'
 				|| this.input[0] == '+'))
 		{
-			return this.parseNumber();
+			this.parseNumber();
+			return;
 		}
 		throw new Exception("Failed to parse Payload, startsWith "
 				~ this.input[0 .. min(this.input.length, 10)]);
 	}
 
-	Payload parseNumber() {
+	void parseNumber() {
 		enforce(!input.empty, "Passed empty range to parseNumber");
 
 		BigInt collector;
 		bool neg = false;
 
-		Payload returnInt() {
+		void returnInt() {
 			collector = neg
 				? -collector
 				: collector;
 
 			const long r = collector.toLong();
-			return r == long.max || r == long.min
-				? Payload(collector)
-				: Payload(r);
+			Integer i = r == long.max || r == long.min
+				? Integer(collector)
+				: Integer(r);
+			this.onInteger(i, this.getCurrentPosition());
 		}
 
 		// negative sign
@@ -309,7 +353,10 @@ struct JsonParser {
 			if (input.matches!(inf)()) {
 				this.column += inf.length;
 				this.input = this.input[inf.length .. $];
-				return Payload(neg ? -double.infinity : double.infinity);
+				callIfNotNull(this.onFloatingPoint
+					, neg ? -double.infinity : double.infinity
+					, this.getCurrentPosition());
+				return;
 			}
 			enforce(false, "Invalid number, expected 'Infinity'");
 		}
@@ -318,7 +365,10 @@ struct JsonParser {
 			if (input.matches!("NaN")()) {
 				this.column += nan.length;
 				this.input = this.input[nan.length .. $];
-				return Payload(double.nan);
+				callIfNotNull(this.onFloatingPoint
+					, double.nan
+					, this.getCurrentPosition());
+				return;
 			}
 			enforce(false, "Invalid number, expected 'NaN'");
 		}
@@ -332,7 +382,8 @@ struct JsonParser {
 			this.column++;
 			if (input.empty) { // return 0
 				long r = 0;
-				return Payload(r);
+				this.onInteger(Integer(r), this.getCurrentPosition());
+				return;
 			}
 
 			enforce(this.input.empty || !this.input[0].isDigit()
@@ -348,14 +399,14 @@ struct JsonParser {
 
 			if (input.empty || isTokenStop(input[0])) // return integer
 			{
-				return returnInt();
+				returnInt();
+				return;
 			}
 		}
 
 		int exponent = 0;
 
-		// post decimal point part
-		enforce(!input.empty);
+		enforce(!input.empty, "post decimal point part empty");
 		if (input[0] == '.')
 		{
 			this.input = this.input[1 .. $];
@@ -380,7 +431,9 @@ struct JsonParser {
 				if(input.empty || isTokenStop(input[0])) {
 					long expPow = pow(10, -exponent);
 					if(expPow == 0 || expPow == -0) {
-						return Payload(0.0);
+						callIfNotNull(this.onFloatingPoint, 0.0,
+								this.getCurrentPosition());
+						return;
 					}
 					BigInt integralPart = collector / expPow;
 					integralPart = integralPart * expPow;
@@ -388,7 +441,9 @@ struct JsonParser {
 					integralPart = integralPart / expPow;
 					string d = integralPart.toDecimalString() ~ "." ~
 						floatPart.toDecimalString();
-					return Payload(d.to!double());
+					callIfNotNull(this.onFloatingPoint, d.to!double(),
+							this.getCurrentPosition());
+					return;
 				}
 			}
 
@@ -441,7 +496,8 @@ struct JsonParser {
 		}
 
 		if (exponent == 0) {
-			return returnInt();
+			returnInt();
+			return;
 		}
 
 		if (neg) {
@@ -449,11 +505,13 @@ struct JsonParser {
 		}
 
 		//_front.number = exp10(exponent) * int_part.toDecimalString.to!double;
-		return Payload(collector.toDecimalString.to!double() * exp10(exponent));
+		callIfNotNull(this.onFloatingPoint
+				, collector.toDecimalString.to!double() * exp10(exponent)
+				, this.getCurrentPosition());
 	}
 
-	Payload parseObject() {
-		Payload[string] elements;
+	void parseObject() {
+		callIfNotNull(this.onObjectBegin, this.getCurrentPosition());
 		bool notFirst = false;
 		this.stripWhitespace();
 		while(!this.input.empty && this.input[0] != '}') {
@@ -467,6 +525,7 @@ struct JsonParser {
 			}
 			this.stripWhitespace();
 			string key = this.parseString();
+			callIfNotNull(this.onKey, key, getCurrentPosition());
 			this.stripWhitespace();
 			enforce(!this.input.empty && this.input[0] == ':'
 					, "Expected ':' got '" ~ (!this.input.empty ? to!string(this.input[0]) : "")
@@ -474,10 +533,7 @@ struct JsonParser {
 			this.input = this.input[1 .. $];
 			this.column++;
 			this.stripWhitespace();
-			Payload value = this.parseElement();
-			() @trusted {
-				elements[key] = value;
-			}();
+			this.parseValue();
 			notFirst = true;
 			this.stripWhitespace();
 		}
@@ -485,13 +541,13 @@ struct JsonParser {
 		enforce(!this.input.empty && this.input[0] == '}', "Expected '}' got '"
 				~ (this.input.empty ? "" : to!string(this.input[0]))
 				~ "'");
+		callIfNotNull(this.onObjectEnd, this.getCurrentPosition());
 		this.input = this.input[1 .. $];
 		this.column++;
-		return Payload(elements);
 	}
 
-	Payload parseArray() {
-		Payload[] elements;
+	void parseArray() {
+		callIfNotNull(this.onArrayBegin, this.getCurrentPosition());
 		bool notFirst = false;
 		this.stripWhitespace();
 		while(!this.input.empty && this.input[0] != ']') {
@@ -503,7 +559,7 @@ struct JsonParser {
 				this.column++;
 			}
 			this.stripWhitespace();
-			elements ~= this.parseElement();
+			this.parseValue();
 			this.stripWhitespace();
 			notFirst = true;
 		}
@@ -514,7 +570,7 @@ struct JsonParser {
 		this.input = this.input[1 .. $];
 		this.column++;
 		this.stripWhitespace();
-		return Payload(elements);
+		callIfNotNull(this.onArrayEnd, this.getCurrentPosition());
 	}
 
 	string parseString() {
@@ -595,9 +651,23 @@ private string numberToString(Payload p) @safe pure{
 		Payload rslt = expected;
 		Payload r;
 		auto p = JsonParser(input);
+		void onInteger(Integer i, Position) @trusted {
+			r = i.match!
+					( (BigInt bi) => Payload(bi)
+					, (long l) => Payload(l)
+					);
+		}
+
+		void onFloat(double d, Position) @trusted {
+			r = Payload(d);
+		}
+
+		p.onFloatingPoint = &onFloat;
+		p.onInteger = &onInteger;
+
 		try {
 			() @trusted {
-				r = p.parseNumber();
+				p.parseNumber();
 			}();
 		} catch(Exception e) {
 			throw new AssertError(e, __FILE__, line);
