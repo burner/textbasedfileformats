@@ -32,6 +32,53 @@ alias Payload = SumType!
 	Payload v = 10;
 }
 
+string toString(ref Payload p) @trusted {
+	import std.array : appender;
+	auto app = appender!string();
+	toString(app, p);
+	return app.data;
+}
+
+private void objToString(A)(auto ref A app, Payload[string] obj) @safe {
+	app.put("{");
+	int i;
+	foreach(string key, ref val; obj) {
+		if(i > 0) {
+			app.put(",");
+		}
+		++i;
+		app.put("\"");
+		app.put(key);
+		app.put("\":");
+		toString(app, val);
+	}
+	app.put("}");
+}
+
+private void arrToString(A)(auto ref A app, Payload[] arr) @safe {
+	app.put("[");
+	foreach(i, ref it; arr) {
+		if(i > 0) {
+			app.put(",");
+		}
+		toString(app, it);
+	}
+	app.put("]");
+}
+
+void toString(A)(auto ref A app, ref Payload p) @trusted {
+	p.match!
+		( (typeof(null)) => app.put("null")
+		, (string s) { app.put("\""); app.put(s); app.put("\""); }
+		, (bool b) => app.put(b ? "true" : "false")
+		, (long l) => app.put(to!string(l))
+		, (double d) => app.put(to!string(d))
+		, (BigInt bi) => bi.toString(app, "d")
+		, (Payload[] arr) => arrToString(app, arr)
+		, (Payload[string] obj) => objToString(app, obj)
+		);
+}
+
 private immutable tokenEnd = [ ' ', '\t', '\r', '\n', ',', ':', '{', '}', '[', ']'];
 private immutable whiteSpace = [ ' ', '\t', '\r', '\v', '\f'];
 
@@ -92,8 +139,11 @@ Payload parseJson(string input) {
 		, onObjectBegin: &jdp.onObjectBegin
 		, onObjectEnd: &jdp.onObjectEnd
 		, onInteger: &jdp.onInteger
+		, onFloatingPoint: &jdp.onFloatingPoint
+		, onNull: &jdp.onNull
 		, onKey: &jdp.onKey
 		, onString: &jdp.onString
+		, onBool: &jdp.onBool
 		};
 	jp.parse();
 	enforce(jp.input.empty, "Input not completly consumed");
@@ -149,7 +199,21 @@ struct JsonDomParser {
 			() @trusted { // TODO
 				this.ret = tmp;
 			}();
+		} else {
+			this.stack.back.match!
+				( (ref Payload[string] obj) @trusted {
+					obj[this.keyStack.back] = tmp;
+					this.keyStack.popBack();
+					return 0;
+				}
+				, (ref Payload[] arr) @trusted {
+					arr ~= tmp;
+					return 0;
+				}
+				, _ => 0
+			);
 		}
+		this.state.popBack();
 	}
 
 	void onArrayBegin(Position) {
@@ -165,11 +229,71 @@ struct JsonDomParser {
 			() @trusted { // TODO
 				this.ret = tmp;
 			}();
+		} else {
+			this.stack.back.match!
+				( (ref Payload[string] obj) @trusted {
+					obj[this.keyStack.back] = tmp;
+					this.keyStack.popBack();
+					return 0;
+				}
+				, (ref Payload[] arr) @trusted {
+					arr ~= tmp;
+					return 0;
+				}
+				, _ => 0
+			);
 		}
+		this.state.popBack();
 	}
 
 	void onKey(string key, Position) {
 		this.keyStack ~= key;
+	}
+
+	void onBool(bool b, Position) {
+		if(this.stack.empty) {
+			() @trusted {
+				this.ret = Payload(b);
+			}();
+			return;
+		}
+		this.stack.back.match!
+			( (ref Payload[string] obj) @trusted {
+				obj[this.keyStack.back] = Payload(b);
+				return 0;
+			}
+			, (ref Payload[] arr) @trusted {
+				arr ~= Payload(b);
+				return 0;
+			}
+			, _ => 0
+		);
+		if(this.state.back == State.object) {
+			this.keyStack.popBack();
+		}
+	}
+
+	void onNull(Position) {
+		if(this.stack.empty) {
+			() @trusted {
+				this.ret = Payload(null);
+			}();
+			return;
+		}
+		this.stack.back.match!
+			( (ref Payload[string] obj) @trusted {
+				obj[this.keyStack.back] = Payload(null);
+				return 0;
+			}
+			, (ref Payload[] arr) @trusted {
+				arr ~= Payload(null);
+				return 0;
+			}
+			, _ => 0
+		);
+		if(this.state.back == State.object) {
+			this.keyStack.popBack();
+		}
 	}
 
 	void onInteger(Integer i, Position) @trusted {
@@ -189,6 +313,7 @@ struct JsonDomParser {
 				return 0;
 			}
 			, (ref Payload[] arr) {
+				long l = arr.length;
 				arr ~= i.match!
 					( (long l) => Payload(l)
 					, (BigInt l) => Payload(l)
@@ -612,29 +737,46 @@ struct JsonParser {
 	}
 }
 
+private void toStringCmp(string old, Payload pl) {
+	import std.string : replace;
+
+	string oldNoWhiteSpace = old.replace(" ","")
+		.replace("\t", "")
+		.replace("\n", "");
+
+	string fromPl = toString(pl);
+	assert(oldNoWhiteSpace == fromPl
+			, "\nold: " ~ oldNoWhiteSpace ~ "\nnew: "~ fromPl);
+}
+
 unittest {
 	string tp = `{}`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
 	string tp = `{ "hello": null }`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
 	string tp = `{ "hello": [] }`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
 	string tp = `{ "hello": "world" }`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
 	string tp = `{ "hello": [ null, true, false] }`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
@@ -642,11 +784,13 @@ unittest {
 		true, false
 	]}`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 unittest {
-	string tp = `{"x":[{"id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}], "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`;
+	string tp = `{"id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","x":[{"id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}`;
 	auto p = parseJson(tp);
+	toStringCmp(tp, p);
 }
 
 private string numberToString(Payload p) @safe pure{
