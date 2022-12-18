@@ -24,6 +24,7 @@ Please see the github issues and projects
 ## thoughts on the code
 
 Please use the SAX parser to create the DOM parser.
+
 `@nogc` is not the aim.
 Do not be smart.
 Simple code is better code.
@@ -68,3 +69,9 @@ void someFunc(T)(T t) {
 
 Conditional statements get block statement, aka. every if, foreach, while and so
 are followed by {}.
+
+Only use `assert`s in unittests.
+
+Do not return by ref.
+
+Do not take the address of stack variables, so no unary &.
