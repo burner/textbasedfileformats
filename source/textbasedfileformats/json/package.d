@@ -899,7 +899,8 @@ private string numberToString(Payload p) @safe pure{
 			.filter!(n => n.name.startsWith("JSONTestSuite/test_parsing/y_")))
 	{
 		try {
-			auto p = parseJson(readText(ma.name));
+			string s = readText(ma.name);
+			auto p = parseJson(s);
 		} catch(Exception e) {
 			writeln(ma.name);
 		}

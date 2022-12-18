@@ -212,6 +212,7 @@ void uselessCallback(CursorError err)
 + - We don't have any validation, so we accept all files that seem well formed;
 +/
 unittest {
+	/*
     auto cursor =
          chooseLexer!string
         .parser
@@ -230,6 +231,7 @@ unittest {
 
     printResults(results, 0);
     writeln();
+	*/
 }
 
 bool parseFile(string filename, ref bool lint)
