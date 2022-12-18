@@ -173,6 +173,13 @@ struct JsonDomParser {
 	}
 
 	void onInteger(Integer i, Position) @trusted {
+		if(this.stack.empty) {
+			this.ret = i.match!
+					( (long l) => Payload(l)
+					, (BigInt l) => Payload(l)
+					);
+			return;
+		}
 		this.stack.back.match!
 			( (ref Payload[string] obj) {
 				obj[this.keyStack.back] = i.match!
@@ -196,6 +203,10 @@ struct JsonDomParser {
 	}
 
 	void onFloatingPoint(double d, Position) @trusted {
+		if(this.stack.empty) {
+			this.ret = Payload(d);
+			return;
+		}
 		this.stack.back.match!
 			( (ref Payload[string] obj) {
 				obj[this.keyStack.back] = d;
@@ -213,6 +224,10 @@ struct JsonDomParser {
 	}
 
 	void onString(string s, Position) @trusted {
+		if(this.stack.empty) {
+			this.ret = Payload(s);
+			return;
+		}
 		this.stack.back.match!
 			( (ref Payload[string] obj) {
 				obj[this.keyStack.back] = s;
