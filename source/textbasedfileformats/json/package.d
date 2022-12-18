@@ -18,6 +18,7 @@ import std.uni : isWhite;
 
 @safe:
 
+///
 alias Payload = SumType!
 	( string
 	, long
@@ -27,6 +28,27 @@ alias Payload = SumType!
 	, BigInt
 	, This[]
 	, This[string]);
+
+///
+Payload parseJson(string input) {
+	JsonDomParser jdp;
+	JsonParser jp =
+		{ input: input
+		, onArrayBegin: &jdp.onArrayBegin
+		, onArrayEnd: &jdp.onArrayEnd
+		, onObjectBegin: &jdp.onObjectBegin
+		, onObjectEnd: &jdp.onObjectEnd
+		, onInteger: &jdp.onInteger
+		, onFloatingPoint: &jdp.onFloatingPoint
+		, onNull: &jdp.onNull
+		, onKey: &jdp.onKey
+		, onString: &jdp.onString
+		, onBool: &jdp.onBool
+		};
+	jp.parse();
+	enforce(jp.input.empty, "Input not completly consumed");
+	return jdp.ret;
+}
 
 @safe unittest {
 	Payload v = 10;
@@ -128,26 +150,6 @@ private bool matches(string toMatch)(string input) {
 unittest {
 	string tt = "null, true";
 	assert(tt.matches!("null"));
-}
-
-Payload parseJson(string input) {
-	JsonDomParser jdp;
-	JsonParser jp =
-		{ input: input
-		, onArrayBegin: &jdp.onArrayBegin
-		, onArrayEnd: &jdp.onArrayEnd
-		, onObjectBegin: &jdp.onObjectBegin
-		, onObjectEnd: &jdp.onObjectEnd
-		, onInteger: &jdp.onInteger
-		, onFloatingPoint: &jdp.onFloatingPoint
-		, onNull: &jdp.onNull
-		, onKey: &jdp.onKey
-		, onString: &jdp.onString
-		, onBool: &jdp.onBool
-		};
-	jp.parse();
-	enforce(jp.input.empty, "Input not completly consumed");
-	return jdp.ret;
 }
 
 alias Integer = SumType!
