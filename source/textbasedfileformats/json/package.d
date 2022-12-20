@@ -181,13 +181,6 @@ struct JsonDomParser {
 	string[] keyStack;
 	State[] state;
 
-	JsonParser parser;
-
-	Payload parse() {
-		this.parser.parse();
-		return ret;
-	}
-
 	void onObjectBegin(Position) {
 		Payload[string] t;
 		this.stack ~= Payload(t);

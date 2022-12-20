@@ -6,5 +6,13 @@
 	"copyright": "Copyright © 2022, burner",
 	"description": "A minimal D application.",
 	"license": "proprietary",
-	"name": "textbasedfileformats"
+	"name": "textbasedfileformats",
+	"configurations": [
+		{
+			"name": "jsontest",
+			"dflags": ["-unittest", "-main"],
+			"targetType": "executable",
+			"sourcePath": ["source/textbasedfileformats/json/"]
+		}
+	]
 }
